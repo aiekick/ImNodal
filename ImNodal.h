@@ -38,6 +38,9 @@ SOFTWARE.
 #define IMNODAL_API
 #endif
 
+#include <cstddef>
+#include <cstdint>
+
 #ifndef IMGUI_DEFINE_MATH_OPERATORS
 #define IMGUI_DEFINE_MATH_OPERATORS
 #endif
@@ -157,5 +160,130 @@ IMNODAL_API bool IsCanvasSuspended();
 // Must be called between Begin and End.
 // -----------------------------
 IMNODAL_API void DrawCanvasGrid();
+
+// =====================================================================
+// Graph layer (M1: skeleton — Graph + Node + Slot primitive + sections)
+// =====================================================================
+// Design philosophy: the slot is the primitive. Nodes are intelligent
+// containers that pin slots on their edges. A slot can be emitted ANYWHERE
+// (inside a node section, inside a plain ImGui window, inline with text...).
+//
+// Usage (M1):
+//
+//     if (BeginCanvas("c", size, canvasSettings)) {
+//         if (BeginGraph(graphId, graphSettings)) {
+//             if (BeginNode(nodeId, &pos, nodeSettings)) {
+//                 if (BeginHeader())  { ImGui::Text("Title"); EndHeader(); }
+//                 if (BeginInputs())  {
+//                     if (BeginInputSlot(slotId, "A")) { /* widgets */ EndSlot(); }
+//                     EndInputs();
+//                 }
+//                 if (BeginCenter())  { /* body widget */ EndCenter(); }
+//                 if (BeginOutputs()) {
+//                     if (BeginOutputSlot(slotId2, "Out")) { EndSlot(); }
+//                     EndOutputs();
+//                 }
+//                 if (BeginFooter()) { /* widgets */ EndFooter(); }
+//                 EndNode();
+//             }
+//             EndGraph();
+//         }
+//         EndCanvas();
+//     }
+//
+// BeginGraph must be called INSIDE a BeginCanvas scope.
+
+using Id = uint64_t;  // ImNodal::Id — user-chosen, must be non-zero
+
+enum SlotRole_ {
+    SlotRole_Input = 0,
+    SlotRole_Output = 1,
+};
+typedef int SlotRole;
+
+// -----------------------------
+// Graph
+// -----------------------------
+struct GraphSettings {
+    bool allowBoxSelect{true};
+    bool allowMultiSelect{true};
+    ImGuiKey multiSelectKey{ImGuiMod_Shift};
+    ImGuiMouseButton selectButton{ImGuiMouseButton_Left};
+    ImGuiMouseButton dragButton{ImGuiMouseButton_Left};
+    float minSlotHitRadiusScreen{8.0f};  // keeps slots clickable when zoomed out
+    GraphSettings() = default;
+};
+
+IMNODAL_API bool BeginGraph(Id aGraphId, const GraphSettings& arSettings = {});
+IMNODAL_API void EndGraph();
+IMNODAL_API Id   GetCurrentGraphId();
+
+// -----------------------------
+// Node
+// -----------------------------
+struct NodeSettings {
+    ImU32 headerColor{IM_COL32(60, 120, 180, 255)};
+    ImU32 bodyColor{IM_COL32(50, 50, 50, 230)};
+    ImU32 borderColor{IM_COL32(80, 80, 80, 255)};
+    ImU32 selectedBorderColor{IM_COL32(255, 180, 0, 255)};
+    ImU32 titleColor{IM_COL32(255, 255, 255, 255)};
+    float rounding{4.0f};
+    float borderThickness{1.5f};
+    float headerPadding{6.0f};
+    float bodyPadding{6.0f};
+    float columnSpacing{10.0f};   // between Inputs/Center/Outputs
+    bool  movable{true};
+    bool  hasInnerGraph{false};
+    NodeSettings() = default;
+};
+
+// aPos is IN/OUT in canvas space. When non-null and movable, dragging updates it.
+IMNODAL_API bool BeginNode(Id aNodeId, ImVec2* apPos, const NodeSettings& arSettings = {});
+IMNODAL_API void EndNode();
+
+// Optional layout sections. None are mandatory. Body = Inputs | Center | Outputs
+// organized in 3 columns via SameLine; Header above body; Footer below.
+IMNODAL_API bool BeginHeader();  IMNODAL_API void EndHeader();
+IMNODAL_API bool BeginInputs();  IMNODAL_API void EndInputs();
+IMNODAL_API bool BeginCenter();  IMNODAL_API void EndCenter();
+IMNODAL_API bool BeginOutputs(); IMNODAL_API void EndOutputs();
+IMNODAL_API bool BeginFooter();  IMNODAL_API void EndFooter();
+
+// -----------------------------
+// Slot (primitive — usable anywhere)
+// -----------------------------
+struct SlotSettings {
+    ImU32 dotColor{IM_COL32(200, 200, 200, 255)};
+    ImU32 dotColorConnected{IM_COL32(255, 220, 0, 255)};
+    ImU32 dotColorHovered{IM_COL32(255, 255, 255, 255)};
+    float dotRadius{5.0f};
+    uint32_t typeTag{0};   // user-chosen type tag (for M2 connection rules)
+    SlotSettings() = default;
+};
+
+// Render a slot. Positioning behavior depends on the current "pin mode":
+//   - inside BeginInputs()  → dot pinned to the node's left edge
+//   - inside BeginOutputs() → dot pinned to the node's right edge
+//   - anywhere else         → dot inline next to the label/widget
+//
+// Dot Y is always centered on the group rect of everything emitted between
+// BeginSlot and EndSlot.
+IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const char* aLabel, const SlotSettings& arSettings = {});
+IMNODAL_API void EndSlot();
+// Convenience wrappers
+IMNODAL_API bool BeginInputSlot (Id aSlotId, const char* aLabel, const SlotSettings& arSettings = {});
+IMNODAL_API bool BeginOutputSlot(Id aSlotId, const char* aLabel, const SlotSettings& arSettings = {});
+
+// -----------------------------
+// Graph queries & interactions (M1: minimal set)
+// -----------------------------
+IMNODAL_API ImVec2 GetSlotScreenPos(Id aSlotId);
+IMNODAL_API bool   IsSlotHovered(Id aSlotId);
+
+IMNODAL_API bool   IsNodeHovered(Id* apoNodeId);        // set *apoNodeId to hovered node id if any
+IMNODAL_API bool   IsNodeSelected(Id aNodeId);
+IMNODAL_API Id     GetSelectedNode();                    // 0 if none (M1: single selection only)
+IMNODAL_API void   SetSelectedNode(Id aNodeId);          // pass 0 to clear
+IMNODAL_API bool   IsNodeDragging(Id aNodeId);
 
 }  // namespace ImNodal
