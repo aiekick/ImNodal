@@ -74,6 +74,13 @@ IMNODAL_API void     DestroyContext(Context* apCtx = nullptr);  // null = destro
 IMNODAL_API Context* GetCurrentContext();
 IMNODAL_API void     SetCurrentContext(Context* apCtx);
 
+// Must be called once per frame on the current context, BEFORE any other
+// ImNodal call this frame (same contract as ImGui::NewFrame). Clears per-frame
+// state: hovered slot/link flags, connection-create transient flags, stale
+// drag state left behind by a missing EndConnectionCreate. Calling it more
+// than once per frame is a no-op.
+IMNODAL_API void     NewFrame();
+
 // =====================================================================
 // Canvas
 // =====================================================================
@@ -196,8 +203,9 @@ IMNODAL_API void DrawCanvasGrid();
 using Id = uint64_t;  // ImNodal::Id — user-chosen, must be non-zero
 
 enum SlotRole_ {
-    SlotRole_Input = 0,
+    SlotRole_Input  = 0,
     SlotRole_Output = 1,
+    SlotRole_InOut  = 2,  // bidirectional (reroute / bridge slots) — accepts links either way
 };
 typedef int SlotRole;
 
@@ -227,13 +235,16 @@ struct NodeSettings {
     ImU32 borderColor{IM_COL32(80, 80, 80, 255)};
     ImU32 selectedBorderColor{IM_COL32(255, 180, 0, 255)};
     ImU32 titleColor{IM_COL32(255, 255, 255, 255)};
+    ImU32 hoverHandleColor{IM_COL32(255, 255, 255, 120)};   // drawn when drawHoverHandle && hovered
     float rounding{4.0f};
     float borderThickness{1.5f};
     float headerPadding{6.0f};
     float bodyPadding{6.0f};
     float columnSpacing{10.0f};   // between Inputs/Center/Outputs
+    float hoverHandleHeight{4.0f}; // height of the hover-only drag bar (reroute-style nodes)
     bool  movable{true};
     bool  hasInnerGraph{false};
+    bool  drawHoverHandle{false}; // draw a drag bar on top of the node when hovered (reroute-style nodes)
     NodeSettings() = default;
 };
 
@@ -275,15 +286,77 @@ IMNODAL_API bool BeginInputSlot (Id aSlotId, const char* aLabel, const SlotSetti
 IMNODAL_API bool BeginOutputSlot(Id aSlotId, const char* aLabel, const SlotSettings& arSettings = {});
 
 // -----------------------------
-// Graph queries & interactions (M1: minimal set)
+// Graph queries & interactions
 // -----------------------------
 IMNODAL_API ImVec2 GetSlotScreenPos(Id aSlotId);
+IMNODAL_API ImVec2 GetSlotTangent(Id aSlotId);         // unit vector pointing away from the node edge
 IMNODAL_API bool   IsSlotHovered(Id aSlotId);
+IMNODAL_API bool   IsSlotConnected(Id aSlotId);
 
 IMNODAL_API bool   IsNodeHovered(Id* apoNodeId);        // set *apoNodeId to hovered node id if any
 IMNODAL_API bool   IsNodeSelected(Id aNodeId);
 IMNODAL_API Id     GetSelectedNode();                    // 0 if none (M1: single selection only)
 IMNODAL_API void   SetSelectedNode(Id aNodeId);          // pass 0 to clear
 IMNODAL_API bool   IsNodeDragging(Id aNodeId);
+
+// =====================================================================
+// Links (M2)
+// =====================================================================
+// Default render is a cubic Bezier. Colors default to a neutral white when
+// aColor==0. Must be called inside BeginGraph/EndGraph, after the nodes that
+// own the slots have been emitted (otherwise slot screen positions are stale).
+
+IMNODAL_API void Link(Id aLinkId, Id aFromSlotId, Id aToSlotId, ImU32 aColor = 0, float aThickness = 3.0f);
+
+// Per-link queries (valid after the matching Link() call in the same frame).
+IMNODAL_API bool   IsLinkHovered(Id aLinkId);
+IMNODAL_API bool   IsLinkClicked(Id aLinkId, int aButton = 0);
+IMNODAL_API bool   IsLinkDoubleClicked(Id aLinkId);
+IMNODAL_API bool   IsLinkSelected(Id aLinkId);
+IMNODAL_API Id     GetSelectedLink();
+IMNODAL_API void   SetSelectedLink(Id aLinkId);            // pass 0 to clear
+IMNODAL_API SlotRole GetSlotRole(Id aSlotId);              // useful for rule checks during link creation
+
+// =====================================================================
+// Connection creation (M2 — thedmd-style state machine)
+// =====================================================================
+// Typical usage inside BeginGraph/EndGraph, AFTER nodes + links are declared:
+//
+//     if (BeginConnectionCreate()) {
+//         Id from, to;
+//         if (QueryNewLink(&from, &to)) {
+//             if (rules_ok(from, to)) {
+//                 if (AcceptNewLink()) { commit_link(from, to); }
+//             } else {
+//                 RejectNewLink("type mismatch");
+//             }
+//         }
+//         EndConnectionCreate();
+//     }
+//
+// BeginConnectionCreate returns true as soon as the user starts dragging from
+// a slot. QueryNewLink returns true every frame while a compatible target slot
+// is hovered. AcceptNewLink lights the preview green and returns true once on
+// the frame the mouse is released (commit). RejectNewLink paints it red.
+
+IMNODAL_API bool BeginConnectionCreate();
+IMNODAL_API bool QueryNewLink(Id* apoFromSlotId, Id* apoToSlotId);
+IMNODAL_API bool AcceptNewLink(ImU32 aColor = 0);
+IMNODAL_API void RejectNewLink(const char* aReason = nullptr);
+IMNODAL_API void EndConnectionCreate();
+
+// =====================================================================
+// Reroute node (M2)
+// =====================================================================
+// A minimal pass-through node: no header/body/footer, just an input and an
+// output slot at the same point. Used to bend links. Still draggable; clicking
+// + dragging from either slot starts a new connection.
+
+// A reroute has exactly one slot (SlotRole_InOut) that serves as both input
+// and output. The node shows a hover-only drag handle bar (visible only when
+// the mouse is over the node) so you can move it around. Typically paired
+// with double-click-on-link to split a link at a given point.
+IMNODAL_API bool BeginRerouteNode(Id aNodeId, Id aSlotId, ImVec2* apPos, const NodeSettings& arSettings = {});
+IMNODAL_API void EndRerouteNode();
 
 }  // namespace ImNodal

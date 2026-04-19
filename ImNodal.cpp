@@ -86,6 +86,11 @@ struct LinkState {
     Id    toSlot{0};
     Id    graphId{0};
     ImU32 color{0};
+    // Per-frame interaction state (computed by Link(), reset at BeginGraph).
+    bool  hovered{false};
+    bool  clicked{false};
+    bool  doubleClicked{false};
+    bool  selected{false};
 };
 
 struct GraphState {
@@ -96,10 +101,12 @@ struct GraphState {
     int      preBeginChannel{0};
     // Per-frame set of hovered/selected
     Id       selectedNode{0};
+    Id       selectedLink{0};
     // Draw order / node Z (M1: simple insertion order)
     std::vector<Id> frameNodeOrder;
-    // Set by EndNode when a node consumed the left click this frame. EndGraph
-    // reads this to decide whether a left click on empty space should clear selection.
+    // Set by EndNode or Link() when they consumed the left click this frame.
+    // EndGraph reads this to decide whether a left click on empty space should
+    // clear selection.
     bool     clickConsumedThisFrame{false};
 };
 
@@ -195,6 +202,23 @@ struct Context {
     Id       draggingNodeId{0};
     ImVec2   dragStartNodePos{};
     ImVec2   dragStartMouseCanvas{};
+
+    // -----------------------------
+    // Connection creation state machine (M2)
+    // -----------------------------
+    Id          draggingFromSlot{0};          // Non-zero → user is dragging a link from this slot
+    Id          currentHoveredSlot{0};        // Slot the mouse is currently on this frame
+    bool        connAcceptedThisFrame{false}; // AcceptNewLink called this frame
+    ImU32       connAcceptColor{0};           // Color user passed to AcceptNewLink
+    const char* connRejectReason{nullptr};    // RejectNewLink reason (pointer assumed stable for the frame)
+    bool        connCommitThisFrame{false};   // Set when mouse released AND accepted this frame
+
+    // Global "selected link" for standalone (outside-of-graph) link queries.
+    Id          standaloneSelectedLink{0};
+
+    // Set by ImNodal::NewFrame() to ImGui::GetFrameCount() so repeated calls
+    // within the same frame are idempotent.
+    int         lastFrameReset{-1};
 };
 
 namespace {
@@ -206,6 +230,54 @@ static Context* g_currentCtx{nullptr};
 inline Context& s_getCtx() {
     IM_ASSERT(g_currentCtx != nullptr && "ImNodal: no current context. Call CreateContext() + SetCurrentContext() first.");
     return *g_currentCtx;
+}
+
+// Reset all per-frame state. Invoked by the public ImNodal::NewFrame().
+// Idempotent within a frame: the lastFrameReset guard means extra calls in the
+// same frame are no-ops.
+static void s_doNewFrame(Context& arCtx) {
+    const int frame = ImGui::GetFrameCount();
+    if (arCtx.lastFrameReset == frame) return;
+    arCtx.lastFrameReset = frame;
+
+    arCtx.currentHoveredSlot    = 0;
+    arCtx.connAcceptedThisFrame = false;
+    arCtx.connAcceptColor       = 0;
+    arCtx.connRejectReason      = nullptr;
+    arCtx.connCommitThisFrame   = false;
+
+    for (auto& kv : arCtx.slots) {
+        kv.second.connected = false;
+    }
+    for (auto& kv : arCtx.links) {
+        kv.second.hovered = false;
+        kv.second.clicked = false;
+        kv.second.doubleClicked = false;
+    }
+
+    // Safety: if the mouse has been up for strictly MORE than one frame and the
+    // drag state is still set, the user forgot a matching EndConnectionCreate
+    // (or their BeginConnectionCreate was skipped for scope reasons). Clear it.
+    // We must NOT clear on the release frame itself: EndConnectionCreate needs
+    // IsMouseReleased==true this frame to run its commit logic.
+    const bool mouseUp       = !ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    const bool onReleaseFrame = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+    if (arCtx.draggingFromSlot != 0 && mouseUp && !onReleaseFrame) {
+        arCtx.draggingFromSlot = 0;
+    }
+}
+
+// True if the current drag (if any) originated from a slot whose scope
+// matches the currently open scope — graph id when inside BeginGraph, or 0
+// for standalone slots. Used to gate connection-creation queries/commits so
+// a drag started in one scope doesn't fire handlers in another.
+static bool s_isDragInCurrentScope(const Context& arCtx) {
+    if (arCtx.draggingFromSlot == 0) return false;
+    auto it = arCtx.slots.find(arCtx.draggingFromSlot);
+    if (it == arCtx.slots.end()) return false;
+    const Id dragScope    = it->second.graphId;
+    const Id currentScope = arCtx.graphActive ? arCtx.currentGraphId : (Id)0;
+    return dragScope == currentScope;
 }
 
 inline ImVec2 s_selectPositive(const ImVec2& arA, const ImVec2& arB) {
@@ -461,6 +533,10 @@ IMNODAL_API Context* GetCurrentContext() {
 
 IMNODAL_API void SetCurrentContext(Context* apCtx) {
     g_currentCtx = apCtx;
+}
+
+IMNODAL_API void NewFrame() {
+    s_doNewFrame(s_getCtx());
 }
 
 // -----------------------------
@@ -754,7 +830,6 @@ static PinMode s_currentPinMode(const Context& arCtx) {
 // -----------------------------
 IMNODAL_API bool BeginGraph(Id aGraphId, const GraphSettings& arSettings) {
     Context& rCtx = s_getCtx();
-    IM_ASSERT(rCtx.active && "BeginGraph must be called inside BeginCanvas/EndCanvas");
     IM_ASSERT(!rCtx.graphActive && "BeginGraph called twice without EndGraph");
     IM_ASSERT(aGraphId != 0 && "Graph id must be non-zero");
 
@@ -765,6 +840,11 @@ IMNODAL_API bool BeginGraph(Id aGraphId, const GraphSettings& arSettings) {
     rGraph.id = aGraphId;
     rGraph.settings = arSettings;
     rGraph.frameNodeOrder.clear();
+
+    // Refresh link "selected" flags from this graph's selection (per-frame).
+    for (auto& kv : rCtx.links) {
+        kv.second.selected = (kv.first == rGraph.selectedLink);
+    }
 
     // Open 4-channel splitter for this graph. Default channel = Content.
     auto* const pDrawList = rCtx.drawList;
@@ -785,10 +865,12 @@ IMNODAL_API void EndGraph() {
     GraphState& rGraph = rCtx.graphs[rCtx.currentGraphId];
     auto* const pDrawList = rCtx.drawList;
 
-    // Background click = left click that no node consumed this frame (M1: clears selection).
+    // Background click = left click that nothing (node / link / slot-drag)
+    // consumed this frame. Clears both node and link selection.
     const bool lmbClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
     if (lmbClicked && !rGraph.clickConsumedThisFrame && !rCtx.isPanning) {
         rGraph.selectedNode = 0;
+        rGraph.selectedLink = 0;
     }
     // Reset for next frame
     rGraph.clickConsumedThisFrame = false;
@@ -815,7 +897,6 @@ IMNODAL_API Id GetCurrentGraphId() {
 IMNODAL_API bool BeginNode(Id aNodeId, ImVec2* apPos, const NodeSettings& arSettings) {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.graphActive && "BeginNode must be called inside BeginGraph/EndGraph");
-    IM_ASSERT(rCtx.currentNodeId == 0 && "Nested BeginNode is not supported in M1");
     IM_ASSERT(aNodeId != 0 && "Node id must be non-zero");
 
     NodeState& rNode = rCtx.nodes[aNodeId];
@@ -918,7 +999,22 @@ IMNODAL_API void EndNode() {
     const ImU32 borderCol = rNode.selected ? rNode.settings.selectedBorderColor : rNode.settings.borderColor;
     pDrawList->AddRect(nodeMin, nodeMax, borderCol, rounding, 0, rNode.settings.borderThickness);
 
-    // ---- Commit pending slot X on node edges, draw dots ----
+    // Hover-only drag handle bar — shown only when mouse is on the node.
+    // Used by reroute-style nodes that have no header: gives the user a visible
+    // grab surface to drag the node, appearing only when needed.
+    if (rNode.settings.drawHoverHandle && rNode.hovered) {
+        const float h = rNode.settings.hoverHandleHeight;
+        const ImVec2 bMin(nodeMin.x + 2.0f, nodeMin.y + 1.0f);
+        const ImVec2 bMax(nodeMax.x - 2.0f, nodeMin.y + 1.0f + h);
+        pDrawList->AddRectFilled(bMin, bMax, rNode.settings.hoverHandleColor, h * 0.5f);
+    }
+
+    // ---- Commit pending slot X on node edges, refresh hover, draw dots ----
+    // The hover computed in EndSlot used a preliminary X. Now that we know the
+    // final dot position (at the node edge), we redo a cheap geometric hover
+    // test that includes the dot's outer half (which sits OUTSIDE the node
+    // rect). Without this, hover only fires on the inner half of the dot.
+    const ImVec2 mp = ImGui::GetIO().MousePos;
     for (Id slotId : rNode.pendingSlots) {
         auto it = rCtx.slots.find(slotId);
         if (it == rCtx.slots.end()) continue;
@@ -933,9 +1029,30 @@ IMNODAL_API void EndNode() {
         }
         rSlot.screenPos = ImVec2(x, rSlot.pendingY);
 
-        const ImU32 col = rSlot.hovered ? IM_COL32(255,255,255,255)
-                        : rSlot.connected ? IM_COL32(255,220,0,255)
-                        : IM_COL32(200,200,200,255);
+        // Refresh hover with the FINAL position. Rect covers the dot plus a
+        // strip extending into the node body along the slot's row.
+        const float pad = rSlot.dotRadius + 4.0f;
+        ImVec2 hitMin, hitMax;
+        if (rSlot.pinMode == PinMode_LeftEdge) {
+            // Strip from (dotLeft - pad) to (nodeMin.x + row extent). Use the
+            // row height captured via pendingY ± a generous half-height.
+            hitMin = ImVec2(rSlot.screenPos.x - pad, rSlot.pendingY - 12.0f);
+            hitMax = ImVec2(rSlot.screenPos.x + pad, rSlot.pendingY + 12.0f);
+        } else {
+            hitMin = ImVec2(rSlot.screenPos.x - pad, rSlot.pendingY - 12.0f);
+            hitMax = ImVec2(rSlot.screenPos.x + pad, rSlot.pendingY + 12.0f);
+        }
+        const bool onDot =
+            mp.x >= hitMin.x && mp.x <= hitMax.x &&
+            mp.y >= hitMin.y && mp.y <= hitMax.y;
+        if (onDot) {
+            rSlot.hovered = true;
+            rCtx.currentHoveredSlot = slotId;
+        }
+
+        const ImU32 col = rSlot.hovered   ? IM_COL32(255, 255, 255, 255)
+                        : rSlot.connected ? IM_COL32(255, 220,   0, 255)
+                        :                   IM_COL32(200, 200, 200, 255);
         pDrawList->AddCircleFilled(rSlot.screenPos, rSlot.dotRadius, col);
     }
 
@@ -1036,7 +1153,6 @@ IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const char* aLabel, const
     Context& rCtx = s_getCtx();
     IM_ASSERT(aSlotId != 0 && "Slot id must be non-zero");
     IM_ASSERT(rCtx.currentSlotId == 0 && "Nested BeginSlot is not supported");
-
     SlotState& rSlot = rCtx.slots[aSlotId];
     rSlot.parentNode = rCtx.currentNodeId;
     rSlot.graphId    = rCtx.currentGraphId;
@@ -1052,17 +1168,16 @@ IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const char* aLabel, const
     ImGui::BeginGroup();
 
     const float padding = arSettings.dotRadius * 2.0f + 4.0f;
-    const bool  isInline = (rSlot.pinMode == PinMode_Inline);
     const bool  isOutput = (aRole == SlotRole_Output);
+    const bool  isInOut  = (aRole == SlotRole_InOut);
 
     // Layout rule:
     //  Pinned LeftEdge (input on node edge): indent from the left by dot padding so the label
     //    leaves room for the dot to sit on the node's left border.
     //  Pinned RightEdge (output on node edge): right-align; add padding ON THE RIGHT after the
     //    user widgets — we achieve that by drawing label first and user widgets after.
-    //  Inline: dot side depends on role (input → left of label, output → right).
+    //  Inline: dot side depends on role (input → left of label, output → right; InOut centered).
     if (rSlot.pinMode == PinMode_LeftEdge) {
-        // Reserve space at the left so the dot sits on the node edge
         ImGui::Dummy(ImVec2(padding, 0.0f));
         ImGui::SameLine(0.0f, 0.0f);
         if (aLabel && aLabel[0] != 0) {
@@ -1070,15 +1185,19 @@ IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const char* aLabel, const
             ImGui::SameLine();
         }
     } else if (rSlot.pinMode == PinMode_RightEdge) {
-        // For right-edge outputs, we emit label first then widgets, all followed by right padding.
+        if (aLabel && aLabel[0] != 0) {
+            ImGui::TextUnformatted(aLabel);
+            ImGui::SameLine();
+        }
+    } else if (isInOut) {
+        // InOut inline: no side-specific padding; dot will be centered at EndSlot.
         if (aLabel && aLabel[0] != 0) {
             ImGui::TextUnformatted(aLabel);
             ImGui::SameLine();
         }
     } else {
-        // Inline: dot on the natural side
+        // Inline input/output: dot on the natural side.
         if (!isOutput) {
-            // input → dot left of label, widget right
             ImGui::Dummy(ImVec2(padding, 0.0f));
             ImGui::SameLine(0.0f, 0.0f);
         }
@@ -1109,6 +1228,8 @@ IMNODAL_API void EndSlot() {
     const ImVec2 gMax = ImGui::GetItemRectMax();
     rSlot.pendingY = (gMin.y + gMax.y) * 0.5f;
 
+    const bool isInOut = (rSlot.role == SlotRole_InOut);
+
     // Default screenPos depending on mode (X committed later by EndNode for pinned modes).
     if (rSlot.pinMode == PinMode_LeftEdge) {
         rSlot.screenPos = ImVec2(gMin.x, rSlot.pendingY);   // overwritten by EndNode
@@ -1116,6 +1237,12 @@ IMNODAL_API void EndSlot() {
     } else if (rSlot.pinMode == PinMode_RightEdge) {
         rSlot.screenPos = ImVec2(gMax.x, rSlot.pendingY);
         rSlot.tangent   = ImVec2(1.0f, 0.0f);
+    } else if (isInOut) {
+        // InOut: dot centered on the group rect. Tangent sentinel (0,0) →
+        // resolved dynamically at Link-time based on the other endpoint.
+        const float x = (gMin.x + gMax.x) * 0.5f;
+        rSlot.screenPos = ImVec2(x, rSlot.pendingY);
+        rSlot.tangent   = ImVec2(0.0f, 0.0f);
     } else {
         // Inline: dot sits on the relevant side of the group
         const float x = isOutput ? (gMax.x - rSlot.dotRadius) : (gMin.x + rSlot.dotRadius);
@@ -1123,55 +1250,82 @@ IMNODAL_API void EndSlot() {
         rSlot.tangent   = ImVec2(isOutput ? 1.0f : -1.0f, 0.0f);
     }
 
-    // Hover test — circular, with a min screen-pixel radius at high zoom-out.
-    const float scale = rCtx.scale;
-    const float minHit = (rSlot.graphId != 0)
-        ? (rCtx.graphs.count(rSlot.graphId) ? rCtx.graphs[rSlot.graphId].settings.minSlotHitRadiusScreen : 8.0f)
-        : 8.0f;
-    // Convert minHit (screen px) to canvas-space px (we're in local canvas space here)
-    const float hitRadius = ImMax(rSlot.dotRadius, minHit / (scale > 0.0f ? scale : 1.0f));
-    const ImVec2 mouse = ImGui::GetIO().MousePos;
-    const ImVec2 d = mouse - rSlot.screenPos;
-    rSlot.hovered = (d.x * d.x + d.y * d.y) <= (hitRadius * hitRadius);
+    // --- Hover + click detection: two flavours depending on context ---
+    // Inside a node the slot is just drawing (the node's section layout already
+    // owns the flow); raw geometric test is enough and we claim ActiveId
+    // manually on drag start so the host window doesn't move.
+    // In a plain ImGui window the slot IS a widget: ItemSize + ItemAdd so it
+    // participates in layout like a Button, and ButtonBehavior handles hover /
+    // click / ActiveId naturally.
+    {
+        const float pad = rSlot.dotRadius + 4.0f;
+        const ImRect hitBB(
+            ImMin(gMin, rSlot.screenPos - ImVec2(pad, pad)),
+            ImMax(gMax, rSlot.screenPos + ImVec2(pad, pad)));
+        const bool insideNode = (rCtx.currentNodeId != 0);
+        ImGuiWindow* const pWindow = ImGui::GetCurrentWindow();
 
-    // For pinned modes, queue the slot for X commit at EndNode.
+        if (insideNode) {
+            // --- Drawing-only mode ---
+            const bool mouseOnSlot = ImGui::IsMouseHoveringRect(hitBB.Min, hitBB.Max, false);
+            rSlot.hovered = mouseOnSlot;
+            if (mouseOnSlot) {
+                rCtx.currentHoveredSlot = rCtx.currentSlotId;
+            }
+            if (mouseOnSlot && rCtx.draggingFromSlot == 0 &&
+                ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+                !ImGui::IsAnyItemActive()) {
+                rCtx.draggingFromSlot = rCtx.currentSlotId;
+                const ImGuiID dragId = pWindow->GetID("##imnodal_slot_drag");
+                ImGui::SetActiveID(dragId, pWindow);
+                if (rCtx.graphActive) {
+                    rCtx.graphs[rCtx.currentGraphId].clickConsumedThisFrame = true;
+                }
+            }
+        } else {
+            // --- Widget (button) mode ---
+            // BeginGroup/EndGroup already advanced the layout cursor to the
+            // group's end, so we just register the hit rect as an item and run
+            // ButtonBehavior; ItemSize is skipped because the group handled it.
+            const ImGuiID hitId = pWindow->GetID("##imnodal_slot_hit");
+            ImGui::KeepAliveID(hitId);
+            bool btnHovered = false, btnHeld = false;
+            if (ImGui::ItemAdd(hitBB, hitId)) {
+                ImGui::ButtonBehavior(hitBB, hitId, &btnHovered, &btnHeld,
+                    ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+            }
+            // Raw geometric hover in parallel: while dragging from slot A,
+            // ButtonBehavior on slot B returns hovered=false (ActiveId gating),
+            // so btnHovered alone misses the "I'm the drop target" case. The
+            // raw test bypasses that and keeps the dot color + currentHoveredSlot
+            // up to date for link-target tracking.
+            const bool mouseOnSlot = ImGui::IsMouseHoveringRect(hitBB.Min, hitBB.Max, false);
+            rSlot.hovered = btnHovered || mouseOnSlot;
+            if (mouseOnSlot) {
+                rCtx.currentHoveredSlot = rCtx.currentSlotId;
+            }
+            // Click detection uses ButtonBehavior (which already set ActiveId = hitId).
+            if (btnHeld && rCtx.draggingFromSlot == 0 &&
+                ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                rCtx.draggingFromSlot = rCtx.currentSlotId;
+            }
+        }
+    }
+
+    // --- Commit dot: pinned slots are deferred to EndNode (node edge X is
+    // unknown until then); inline/standalone slots draw the dot now. ---
     if (rCtx.currentNodeId != 0 && (rSlot.pinMode == PinMode_LeftEdge || rSlot.pinMode == PinMode_RightEdge)) {
         rCtx.nodes[rCtx.currentNodeId].pendingSlots.push_back(rCtx.currentSlotId);
     } else {
-        // Inline / standalone: draw the dot now. If we're inside a graph, use the
-        // Background channel so the dot sits under contents. Otherwise fall back to
-        // the current window's draw list (standalone slot in a plain ImGui window).
-        const ImU32 col = rSlot.hovered ? IM_COL32(255,255,255,255)
-                        : rSlot.connected ? IM_COL32(255,220,0,255)
-                        : IM_COL32(200,200,200,255);
+        const ImU32 col = rSlot.hovered   ? IM_COL32(255, 255, 255, 255)
+                        : rSlot.connected ? IM_COL32(255, 220,   0, 255)
+                        :                   IM_COL32(200, 200, 200, 255);
         if (rCtx.graphActive) {
             s_setChannel(rCtx, GC_Background);
             rCtx.drawList->AddCircleFilled(rSlot.screenPos, rSlot.dotRadius, col);
             s_setChannel(rCtx, GC_Content);
         } else {
-            ImDrawList* const pDraw = ImGui::GetWindowDrawList();
-            pDraw->AddCircleFilled(rSlot.screenPos, rSlot.dotRadius, col);
-        }
-    }
-
-    // Invisible click-catcher covering the slot's group rect. Registered via
-    // imgui_internal's ItemAdd + ButtonBehavior so it doesn't alter layout
-    // cursor (SetCursorScreenPos would trigger the ImGui #5548 extend-bounds
-    // assert). Drawn AFTER user widgets so ImGui's ActiveId already belongs to
-    // any widget the user clicked (DragFloat, etc.); the catcher only absorbs
-    // clicks on empty slot area (label text, padding). This stops those clicks
-    // from reaching the node-drag logic (IsAnyItemHovered becomes true) and
-    // the window-move logic (ActiveId becomes this button on press). In M2 the
-    // same capture will start a connection drag.
-    {
-        ImGuiWindow* const pWindow = ImGui::GetCurrentWindow();
-        const ImGuiID hitId = pWindow->GetID("##slot_hit");
-        const ImRect hitBB(gMin, gMax);
-        ImGui::KeepAliveID(hitId);
-        if (ImGui::ItemAdd(hitBB, hitId)) {
-            bool slotHovered = false, slotHeld = false;
-            ImGui::ButtonBehavior(hitBB, hitId, &slotHovered, &slotHeld,
-                ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+            ImGui::GetWindowDrawList()->AddCircleFilled(rSlot.screenPos, rSlot.dotRadius, col);
         }
     }
 
@@ -1194,10 +1348,20 @@ IMNODAL_API ImVec2 GetSlotScreenPos(Id aSlotId) {
     auto it = rCtx.slots.find(aSlotId);
     return (it != rCtx.slots.end()) ? it->second.screenPos : ImVec2(0.0f, 0.0f);
 }
+IMNODAL_API ImVec2 GetSlotTangent(Id aSlotId) {
+    Context& rCtx = s_getCtx();
+    auto it = rCtx.slots.find(aSlotId);
+    return (it != rCtx.slots.end()) ? it->second.tangent : ImVec2(1.0f, 0.0f);
+}
 IMNODAL_API bool IsSlotHovered(Id aSlotId) {
     Context& rCtx = s_getCtx();
     auto it = rCtx.slots.find(aSlotId);
     return (it != rCtx.slots.end()) && it->second.hovered;
+}
+IMNODAL_API bool IsSlotConnected(Id aSlotId) {
+    Context& rCtx = s_getCtx();
+    auto it = rCtx.slots.find(aSlotId);
+    return (it != rCtx.slots.end()) && it->second.connected;
 }
 
 IMNODAL_API bool IsNodeHovered(Id* apoNodeId) {
@@ -1229,6 +1393,355 @@ IMNODAL_API void SetSelectedNode(Id aNodeId) {
 IMNODAL_API bool IsNodeDragging(Id aNodeId) {
     Context& rCtx = s_getCtx();
     return rCtx.draggingNodeId == aNodeId;
+}
+
+IMNODAL_API bool IsLinkHovered(Id aLinkId) {
+    Context& rCtx = s_getCtx();
+    auto it = rCtx.links.find(aLinkId);
+    return (it != rCtx.links.end()) && it->second.hovered;
+}
+IMNODAL_API bool IsLinkClicked(Id aLinkId, int aButton) {
+    (void)aButton;  // M2 only tracks left click
+    Context& rCtx = s_getCtx();
+    auto it = rCtx.links.find(aLinkId);
+    return (it != rCtx.links.end()) && it->second.clicked;
+}
+IMNODAL_API bool IsLinkDoubleClicked(Id aLinkId) {
+    Context& rCtx = s_getCtx();
+    auto it = rCtx.links.find(aLinkId);
+    return (it != rCtx.links.end()) && it->second.doubleClicked;
+}
+IMNODAL_API bool IsLinkSelected(Id aLinkId) {
+    Context& rCtx = s_getCtx();
+    return rCtx.graphs[rCtx.currentGraphId].selectedLink == aLinkId;
+}
+IMNODAL_API Id GetSelectedLink() {
+    Context& rCtx = s_getCtx();
+    if (rCtx.graphActive) {
+        return rCtx.graphs[rCtx.currentGraphId].selectedLink;
+    }
+    return rCtx.standaloneSelectedLink;
+}
+IMNODAL_API void SetSelectedLink(Id aLinkId) {
+    Context& rCtx = s_getCtx();
+    if (rCtx.graphActive) {
+        rCtx.graphs[rCtx.currentGraphId].selectedLink = aLinkId;
+    } else {
+        rCtx.standaloneSelectedLink = aLinkId;
+    }
+}
+IMNODAL_API SlotRole GetSlotRole(Id aSlotId) {
+    Context& rCtx = s_getCtx();
+    auto it = rCtx.slots.find(aSlotId);
+    return (it != rCtx.slots.end()) ? it->second.role : SlotRole_Input;
+}
+
+// =====================================================================
+// Links (M2)
+// =====================================================================
+
+namespace {
+
+// Cubic-Bezier control points from two anchor points + outward tangents.
+// Control point distance scales with the separation so the curve "breathes"
+// nicely when slots are far/close.
+inline void s_bezierCtrl(const ImVec2& aFrom, const ImVec2& aFromTangent,
+                         const ImVec2& aTo,   const ImVec2& aToTangent,
+                         ImVec2& arP1, ImVec2& arP2) {
+    const float dx = aTo.x - aFrom.x;
+    const float dy = aTo.y - aFrom.y;
+    float d = std::sqrt(dx * dx + dy * dy) * 0.4f;
+    if (d < 30.0f) d = 30.0f;
+    if (d > 200.0f) d = 200.0f;
+    arP1 = aFrom + aFromTangent * d;
+    arP2 = aTo   + aToTangent   * d;
+}
+
+// Resolve a slot's tangent. InOut slots use a sentinel (0,0) and get a tangent
+// computed dynamically from the direction toward the other endpoint.
+static ImVec2 s_resolveTangent(const SlotState& arSlot, const ImVec2& aOtherPos) {
+    if (arSlot.tangent.x == 0.0f && arSlot.tangent.y == 0.0f) {
+        const ImVec2 d = aOtherPos - arSlot.screenPos;
+        const float len = std::sqrt(d.x * d.x + d.y * d.y);
+        return (len > 0.0f) ? ImVec2(d.x / len, d.y / len) : ImVec2(1.0f, 0.0f);
+    }
+    return arSlot.tangent;
+}
+
+static void s_drawBezierLink(ImDrawList* apDrawList,
+                             const ImVec2& aFrom, const ImVec2& aFromTangent,
+                             const ImVec2& aTo,   const ImVec2& aToTangent,
+                             ImU32 aColor, float aThickness) {
+    ImVec2 p1, p2;
+    s_bezierCtrl(aFrom, aFromTangent, aTo, aToTangent, p1, p2);
+    apDrawList->AddBezierCubic(aFrom, p1, p2, aTo, aColor, aThickness);
+}
+
+// Hit-test: is the mouse within `aThreshold` of the cubic Bézier curve?
+// Approximated by sampling the curve into N line segments.
+static bool s_isMouseOnBezier(const ImVec2& aP0, const ImVec2& aP1,
+                              const ImVec2& aP2, const ImVec2& aP3,
+                              const ImVec2& aMouse, float aThreshold) {
+    const int kSegments = 24;
+    ImVec2 prev = aP0;
+    const float thr2 = aThreshold * aThreshold;
+    for (int i = 1; i <= kSegments; ++i) {
+        const float t = (float)i / (float)kSegments;
+        const float u = 1.0f - t;
+        const ImVec2 pt =
+            aP0 * (u * u * u) +
+            aP1 * (3.0f * u * u * t) +
+            aP2 * (3.0f * u * t * t) +
+            aP3 * (t * t * t);
+        // Distance from aMouse to the segment (prev, pt).
+        const ImVec2 seg = pt - prev;
+        const ImVec2 toM = aMouse - prev;
+        const float len2 = seg.x * seg.x + seg.y * seg.y;
+        float u2 = 0.0f;
+        if (len2 > 0.0f) {
+            u2 = (toM.x * seg.x + toM.y * seg.y) / len2;
+            if (u2 < 0.0f) u2 = 0.0f;
+            else if (u2 > 1.0f) u2 = 1.0f;
+        }
+        const ImVec2 proj = prev + seg * u2;
+        const ImVec2 delta = aMouse - proj;
+        if (delta.x * delta.x + delta.y * delta.y <= thr2) return true;
+        prev = pt;
+    }
+    return false;
+}
+
+}  // namespace
+
+IMNODAL_API void Link(Id aLinkId, Id aFromSlotId, Id aToSlotId, ImU32 aColor, float aThickness) {
+    Context& rCtx = s_getCtx();
+    IM_ASSERT(aLinkId != 0 && "Link id must be non-zero");
+
+    auto itF = rCtx.slots.find(aFromSlotId);
+    auto itT = rCtx.slots.find(aToSlotId);
+    if (itF == rCtx.slots.end() || itT == rCtx.slots.end()) {
+        return;
+    }
+    SlotState& rFrom = itF->second;
+    SlotState& rTo   = itT->second;
+
+    LinkState& rLink = rCtx.links[aLinkId];
+    rLink.fromSlot = aFromSlotId;
+    rLink.toSlot   = aToSlotId;
+    rLink.graphId  = rCtx.currentGraphId;
+    const ImU32 baseColor = (aColor != 0) ? aColor : IM_COL32(220, 220, 220, 230);
+    rLink.color    = baseColor;
+
+    rFrom.connected = true;
+    rTo.connected   = true;
+
+    // Resolve tangents (InOut slots are dynamic).
+    const ImVec2 fromTan = s_resolveTangent(rFrom, rTo.screenPos);
+    const ImVec2 toTan   = s_resolveTangent(rTo,   rFrom.screenPos);
+
+    // Hit-test against the bezier.
+    ImVec2 p1, p2;
+    s_bezierCtrl(rFrom.screenPos, fromTan, rTo.screenPos, toTan, p1, p2);
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    const float canvasScale = rCtx.scale > 0.0f ? rCtx.scale : 1.0f;
+    const float hitThreshold = ImMax(aThickness * 2.0f, 6.0f / canvasScale);
+
+    rLink.hovered = s_isMouseOnBezier(rFrom.screenPos, p1, p2, rTo.screenPos, mouse, hitThreshold);
+    rLink.clicked = false;
+    rLink.doubleClicked = false;
+
+    // Track selection at graph scope if we're inside a graph, otherwise use
+    // the context-level standaloneSelectedLink field.
+    GraphState* pGraph = rCtx.graphActive ? &rCtx.graphs[rCtx.currentGraphId] : nullptr;
+    const bool clickConsumed = pGraph ? pGraph->clickConsumedThisFrame : false;
+
+    const bool canConsume = rLink.hovered && !ImGui::IsAnyItemHovered() && !clickConsumed && rCtx.draggingFromSlot == 0;
+    if (canConsume) {
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            rLink.clicked = true;
+            if (pGraph) {
+                pGraph->selectedLink = aLinkId;
+                pGraph->selectedNode = 0;
+                pGraph->clickConsumedThisFrame = true;
+            } else {
+                rCtx.standaloneSelectedLink = aLinkId;
+            }
+        }
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            rLink.doubleClicked = true;
+            if (pGraph) pGraph->clickConsumedThisFrame = true;
+        }
+    }
+    const Id selId = pGraph ? pGraph->selectedLink : rCtx.standaloneSelectedLink;
+    rLink.selected = (selId == aLinkId);
+
+    ImU32 drawColor = baseColor;
+    if (rLink.selected) {
+        drawColor = IM_COL32(255, 180, 0, 230);
+    } else if (rLink.hovered) {
+        drawColor = IM_COL32(255, 255, 255, 240);
+    }
+
+    // Draw on the Links channel when inside a graph (so it sits above node
+    // content); otherwise draw directly on the current window's draw list.
+    if (rCtx.graphActive) {
+        auto* const pDrawList = rCtx.drawList;
+        s_setChannel(rCtx, GC_Links);
+        pDrawList->AddBezierCubic(rFrom.screenPos, p1, p2, rTo.screenPos, drawColor, aThickness);
+        s_setChannel(rCtx, GC_Content);
+    } else {
+        ImGui::GetWindowDrawList()->AddBezierCubic(rFrom.screenPos, p1, p2, rTo.screenPos, drawColor, aThickness);
+    }
+}
+
+// =====================================================================
+// Connection creation state machine (M2)
+// =====================================================================
+
+IMNODAL_API bool BeginConnectionCreate() {
+    Context& rCtx = s_getCtx();
+    // True only when a drag is active AND it originated from the currently
+    // open scope (graph or standalone). Without this check, a drag started in
+    // one scope would trigger query/commit in every other scope too.
+    return s_isDragInCurrentScope(rCtx);
+}
+IMNODAL_API bool QueryNewLink(Id* apoFromSlotId, Id* apoToSlotId) {
+    Context& rCtx = s_getCtx();
+    if (!s_isDragInCurrentScope(rCtx)) return false;
+    const Id from = rCtx.draggingFromSlot;
+    const Id to   = rCtx.currentHoveredSlot;
+    if (to == 0 || to == from) return false;
+    auto itF = rCtx.slots.find(from);
+    auto itT = rCtx.slots.find(to);
+    if (itF == rCtx.slots.end() || itT == rCtx.slots.end()) return false;
+    // Target must live in the same scope too (no cross-scope links in M2).
+    const Id currentScope = rCtx.graphActive ? rCtx.currentGraphId : (Id)0;
+    if (itT->second.graphId != currentScope) return false;
+    // Don't offer self-connections within the same node.
+    if (itF->second.parentNode != 0 && itF->second.parentNode == itT->second.parentNode) {
+        return false;
+    }
+    if (apoFromSlotId) *apoFromSlotId = from;
+    if (apoToSlotId)   *apoToSlotId   = to;
+    return true;
+}
+
+IMNODAL_API bool AcceptNewLink(ImU32 aColor) {
+    Context& rCtx = s_getCtx();
+    if (!s_isDragInCurrentScope(rCtx)) return false;
+    rCtx.connAcceptedThisFrame = true;
+    rCtx.connAcceptColor = (aColor != 0) ? aColor : IM_COL32(120, 255, 120, 230);
+    rCtx.connRejectReason = nullptr;
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        rCtx.connCommitThisFrame = true;
+        return true;
+    }
+    return false;
+}
+
+IMNODAL_API void RejectNewLink(const char* aReason) {
+    Context& rCtx = s_getCtx();
+    if (!s_isDragInCurrentScope(rCtx)) return;
+    rCtx.connAcceptedThisFrame = false;
+    rCtx.connAcceptColor = 0;
+    rCtx.connRejectReason = aReason ? aReason : "invalid";
+}
+
+IMNODAL_API void EndConnectionCreate() {
+    Context& rCtx = s_getCtx();
+
+    // Only the scope that OWNS the drag draws the preview. Without this
+    // check, every EndConnectionCreate call (graph + free-window + …) would
+    // draw its own copy of the preview link.
+    if (s_isDragInCurrentScope(rCtx)) {
+        auto itF = rCtx.slots.find(rCtx.draggingFromSlot);
+        if (itF != rCtx.slots.end()) {
+            SlotState& rFrom = itF->second;
+
+            ImVec2 toPos;
+            ImVec2 toTangent;
+            if (rCtx.currentHoveredSlot != 0 && rCtx.currentHoveredSlot != rCtx.draggingFromSlot) {
+                auto itT = rCtx.slots.find(rCtx.currentHoveredSlot);
+                if (itT != rCtx.slots.end()) {
+                    toPos = itT->second.screenPos;
+                    toTangent = s_resolveTangent(itT->second, rFrom.screenPos);
+                } else {
+                    toPos = ImGui::GetIO().MousePos;
+                    toTangent = -s_resolveTangent(rFrom, toPos);
+                }
+            } else {
+                toPos = ImGui::GetIO().MousePos;
+                toTangent = -s_resolveTangent(rFrom, toPos);
+            }
+            const ImVec2 fromTangent = s_resolveTangent(rFrom, toPos);
+
+            ImU32 color;
+            if (rCtx.connAcceptedThisFrame) {
+                color = rCtx.connAcceptColor;
+            } else if (rCtx.connRejectReason != nullptr) {
+                color = IM_COL32(255, 80, 80, 230);
+            } else {
+                color = IM_COL32(220, 220, 220, 200);
+            }
+
+            if (rCtx.graphActive) {
+                auto* const pDrawList = rCtx.drawList;
+                s_setChannel(rCtx, GC_Overlay);
+                s_drawBezierLink(pDrawList, rFrom.screenPos, fromTangent, toPos, toTangent, color, 3.0f);
+                s_setChannel(rCtx, GC_Content);
+            } else {
+                s_drawBezierLink(ImGui::GetWindowDrawList(), rFrom.screenPos, fromTangent, toPos, toTangent, color, 3.0f);
+            }
+        }
+    }
+
+    // End the drag when the mouse is released.
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        rCtx.draggingFromSlot = 0;
+    }
+}
+
+// =====================================================================
+// Reroute node (M2)
+// =====================================================================
+// Minimal 1-in/1-out pass-through node rendered as a single dot. Draggable;
+// clicking on either slot starts a new connection drag.
+
+IMNODAL_API bool BeginRerouteNode(Id aNodeId, Id aSlotId, ImVec2* apPos, const NodeSettings& arSettings) {
+    NodeSettings reSettings = arSettings;
+    // The node itself is transparent — only the slot dot and the hover drag
+    // bar are visible.
+    reSettings.bodyColor           = IM_COL32(0, 0, 0, 0);
+    reSettings.headerColor         = IM_COL32(0, 0, 0, 0);
+    reSettings.borderColor         = IM_COL32(0, 0, 0, 0);
+    reSettings.selectedBorderColor = IM_COL32(255, 180, 0, 255);
+    reSettings.borderThickness     = 0.0f;
+    reSettings.rounding            = 0.0f;
+    reSettings.drawHoverHandle     = true;
+
+    if (!BeginNode(aNodeId, apPos, reSettings)) {
+        return false;
+    }
+
+    // Give the node a small rectangular body so there's drag-room around the
+    // slot. The slot itself lives in the middle with a dummy "body cell" so
+    // its group rect has a sensible size for dot centering.
+    SlotSettings dotSettings{};
+    dotSettings.dotRadius = 5.0f;
+
+    // Leading top spacer so the hover handle has visual room above the dot.
+    ImGui::Dummy(ImVec2(18.0f, 4.0f));
+    BeginSlot(aSlotId, SlotRole_InOut, "", dotSettings);
+    ImGui::Dummy(ImVec2(14.0f, 8.0f));
+    EndSlot();
+    // Trailing bottom spacer so the drag zone extends below the dot too.
+    ImGui::Dummy(ImVec2(18.0f, 2.0f));
+
+    return true;
+}
+
+IMNODAL_API void EndRerouteNode() {
+    EndNode();
 }
 
 }  // namespace ImNodal
