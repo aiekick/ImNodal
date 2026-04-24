@@ -397,7 +397,7 @@ static void s_enterLocalSpace(Context& arCtx) {
 }
 
 static void s_leaveLocalSpace(Context& arCtx) {
-    IM_ASSERT(arCtx.drawList->_Splitter._Current == arCtx.expectedChannel);
+    IM_ASSERT(arCtx.drawList->_Splitter._Current == arCtx.expectedChannel && "Unbalanced channel splitter on leave local space");
 
     // Bake new vertices: canvas-space -> screen-space
     auto* pVtx    = arCtx.drawList->VtxBuffer.Data + arCtx.startVertexIdx;
@@ -487,10 +487,13 @@ static void s_manageZoom(Context& arCtx) {
 }
 
 static void s_manageInteractions(Context& arCtx) {
-    arCtx.bgClicked          = false;
-    arCtx.bgDoubleClicked    = false;
-    arCtx.bgCtxMenuRequested = false;
-
+    // Background interaction flags (bgClicked / bgDoubleClicked / bgCtxMenuRequested)
+    // are NOT reset here. They are owned entirely by EndCanvas: computed there
+    // (set to true or to false depending on "on empty" detection), and remain
+    // stable across the whole next frame so user code can read them INSIDE
+    // their Begin/End scope. Resetting them at Begin would create a window
+    // where End sets the flag and the next Begin immediately clears it before
+    // user code gets a chance to read it.
     if (!ImGui::IsWindowHovered()) {
         return;
     }
@@ -553,7 +556,7 @@ IMNODAL_API bool DebugCheckVersion(const char* aVersion, size_t aSettingsSize) {
 IMNODAL_API bool BeginCanvas(const char* aId, const ImVec2& aSize, const CanvasSettings& arSettings) {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.active == false && "BeginCanvas called twice without EndCanvas");
-    IM_ASSERT(aId != nullptr);
+    IM_ASSERT(aId != nullptr && "BeginCanvas: id must be non-null");
 
     rCtx.settings = arSettings;
 
@@ -735,7 +738,7 @@ IMNODAL_API ImRect GetCanvasViewRect() { return s_getCtx().viewRect; }
 IMNODAL_API void SuspendCanvas() {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.active && "SuspendCanvas outside of Begin/EndCanvas");
-    IM_ASSERT(rCtx.drawList->_Splitter._Current == rCtx.expectedChannel);
+    IM_ASSERT(rCtx.drawList->_Splitter._Current == rCtx.expectedChannel && "SuspendCanvas: unbalanced channel splitter");
     if (rCtx.suspendCounter == 0) {
         s_leaveLocalSpace(rCtx);
     }
@@ -811,7 +814,7 @@ static ImGuiID s_imguiId(Id aId) {
 
 // Bring the draw list to a given graph channel (asserts graph is active).
 static void s_setChannel(Context& arCtx, int aChannel) {
-    IM_ASSERT(arCtx.graphActive);
+    IM_ASSERT(arCtx.graphActive && "s_setChannel requires an active graph (BeginGraph scope)");
     arCtx.drawList->ChannelsSetCurrent(aChannel);
 }
 
@@ -866,9 +869,18 @@ IMNODAL_API void EndGraph() {
     auto* const pDrawList = rCtx.drawList;
 
     // Background click = left click that nothing (node / link / slot-drag)
-    // consumed this frame. Clears both node and link selection.
+    // consumed this frame AND that actually lands inside the canvas widget.
+    // Without the canvas-hover check a click on any other ImGui window (Params,
+    // Debug, main menu…) would deselect, which is wrong: selection must only
+    // clear when the user clicks an empty spot of the canvas itself (clicking
+    // another node re-selects it via the BeginNode path).
+    // NOTE: we're still inside local-space (io.MousePos has been remapped to
+    // canvas coords by s_enterLocalSpace). widgetRect is in screen space, so
+    // the hit-test must compare against the original screen-space mouse pos
+    // saved in mousePosBackup — not io.MousePos / IsMouseHoveringRect.
     const bool lmbClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
-    if (lmbClicked && !rGraph.clickConsumedThisFrame && !rCtx.isPanning) {
+    const bool lmbOnCanvas = ImGui::IsWindowHovered() && rCtx.widgetRect.Contains(rCtx.mousePosBackup);
+    if (lmbClicked && lmbOnCanvas && !rGraph.clickConsumedThisFrame && !rCtx.isPanning) {
         rGraph.selectedNode = 0;
         rGraph.selectedLink = 0;
     }
@@ -881,7 +893,7 @@ IMNODAL_API void EndGraph() {
         rGraph.splitterActive = false;
     }
     // Splitter must be back to the canvas's expected channel
-    IM_ASSERT(pDrawList->_Splitter._Current == rCtx.expectedChannel);
+    IM_ASSERT(pDrawList->_Splitter._Current == rCtx.expectedChannel && "EndGraph: splitter not restored to canvas expected channel");
 
     rCtx.graphActive = false;
     rCtx.currentGraphId = 0;
@@ -1084,7 +1096,7 @@ IMNODAL_API void EndNode() {
 IMNODAL_API bool BeginHeader() {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.currentNodeId != 0 && "BeginHeader outside of BeginNode/EndNode");
-    IM_ASSERT(rCtx.currentSection == Context::Section_None);
+    IM_ASSERT(rCtx.currentSection == Context::Section_None && "BeginHeader while another section is still open");
     rCtx.currentSection = Context::Section_Header;
     rCtx.pinModeStack.push_back(PinMode_Inline);
     ImGui::BeginGroup();
@@ -1092,7 +1104,7 @@ IMNODAL_API bool BeginHeader() {
 }
 IMNODAL_API void EndHeader() {
     Context& rCtx = s_getCtx();
-    IM_ASSERT(rCtx.currentSection == Context::Section_Header);
+    IM_ASSERT(rCtx.currentSection == Context::Section_Header && "EndHeader without matching BeginHeader");
     ImGui::EndGroup();
     NodeState& rNode = rCtx.nodes[rCtx.currentNodeId];
     rNode.hasHeader = true;
@@ -1103,8 +1115,8 @@ IMNODAL_API void EndHeader() {
 
 // Helper: open body column — if another body column was already opened, emit SameLine first.
 static bool s_beginBodyColumn(Context& rCtx, Context::Section aSec, PinMode aMode) {
-    IM_ASSERT(rCtx.currentNodeId != 0);
-    IM_ASSERT(rCtx.currentSection == Context::Section_None);
+    IM_ASSERT(rCtx.currentNodeId != 0 && "BeginInputs/Outputs/Center outside of BeginNode/EndNode");
+    IM_ASSERT(rCtx.currentSection == Context::Section_None && "BeginInputs/Outputs/Center while another section is still open");
     NodeState& rNode = rCtx.nodes[rCtx.currentNodeId];
     if (rNode.bodyColumnOpened) {
         ImGui::SameLine(0.0f, rNode.settings.columnSpacing);
@@ -1115,7 +1127,7 @@ static bool s_beginBodyColumn(Context& rCtx, Context::Section aSec, PinMode aMod
     return true;
 }
 static void s_endBodyColumn(Context& rCtx, Context::Section aSec) {
-    IM_ASSERT(rCtx.currentSection == aSec);
+    IM_ASSERT(rCtx.currentSection == aSec && "EndInputs/Outputs/Center without matching Begin");
     ImGui::EndGroup();
     rCtx.pinModeStack.pop_back();
     rCtx.nodes[rCtx.currentNodeId].bodyColumnOpened = true;
@@ -1132,7 +1144,7 @@ IMNODAL_API void EndOutputs()   { s_endBodyColumn(s_getCtx(), Context::Section_O
 IMNODAL_API bool BeginFooter() {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.currentNodeId != 0 && "BeginFooter outside of BeginNode/EndNode");
-    IM_ASSERT(rCtx.currentSection == Context::Section_None);
+    IM_ASSERT(rCtx.currentSection == Context::Section_None && "BeginFooter while another section is still open");
     rCtx.currentSection = Context::Section_Footer;
     rCtx.pinModeStack.push_back(PinMode_Inline);
     ImGui::BeginGroup();
@@ -1140,7 +1152,7 @@ IMNODAL_API bool BeginFooter() {
 }
 IMNODAL_API void EndFooter() {
     Context& rCtx = s_getCtx();
-    IM_ASSERT(rCtx.currentSection == Context::Section_Footer);
+    IM_ASSERT(rCtx.currentSection == Context::Section_Footer && "EndFooter without matching BeginFooter");
     ImGui::EndGroup();
     rCtx.pinModeStack.pop_back();
     rCtx.currentSection = Context::Section_None;
@@ -1366,6 +1378,7 @@ IMNODAL_API bool IsSlotConnected(Id aSlotId) {
 
 IMNODAL_API bool IsNodeHovered(Id* apoNodeId) {
     Context& rCtx = s_getCtx();
+    IM_ASSERT(rCtx.graphActive && "IsNodeHovered must be called inside BeginGraph/EndGraph");
     GraphState& rGraph = rCtx.graphs[rCtx.currentGraphId];
     // Walk draw order reverse so top-most wins
     for (int i = (int)rGraph.frameNodeOrder.size() - 1; i >= 0; --i) {
@@ -1380,14 +1393,17 @@ IMNODAL_API bool IsNodeHovered(Id* apoNodeId) {
 }
 IMNODAL_API bool IsNodeSelected(Id aNodeId) {
     Context& rCtx = s_getCtx();
+    IM_ASSERT(rCtx.graphActive && "IsNodeSelected must be called inside BeginGraph/EndGraph");
     return rCtx.graphs[rCtx.currentGraphId].selectedNode == aNodeId;
 }
 IMNODAL_API Id GetSelectedNode() {
     Context& rCtx = s_getCtx();
+    IM_ASSERT(rCtx.graphActive && "GetSelectedNode must be called inside BeginGraph/EndGraph");
     return rCtx.graphs[rCtx.currentGraphId].selectedNode;
 }
 IMNODAL_API void SetSelectedNode(Id aNodeId) {
     Context& rCtx = s_getCtx();
+    IM_ASSERT(rCtx.graphActive && "SetSelectedNode must be called inside BeginGraph/EndGraph");
     rCtx.graphs[rCtx.currentGraphId].selectedNode = aNodeId;
 }
 IMNODAL_API bool IsNodeDragging(Id aNodeId) {
@@ -1413,6 +1429,7 @@ IMNODAL_API bool IsLinkDoubleClicked(Id aLinkId) {
 }
 IMNODAL_API bool IsLinkSelected(Id aLinkId) {
     Context& rCtx = s_getCtx();
+    IM_ASSERT(rCtx.graphActive && "IsLinkSelected must be called inside BeginGraph/EndGraph");
     return rCtx.graphs[rCtx.currentGraphId].selectedLink == aLinkId;
 }
 IMNODAL_API Id GetSelectedLink() {
