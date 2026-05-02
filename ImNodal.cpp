@@ -80,6 +80,11 @@ struct NodeState {
     bool     hasHeader{false};
     // Body column tracking (to emit SameLine between Inputs/Center/Outputs automatically)
     bool     bodyColumnOpened{false};
+    // Reroute marker: set by BeginRerouteNode. Switches the selection frame
+    // and the slot hover halo from rectangle to CIRCLE — matches UE-style
+    // reroutes (a small dot with a ring on hover/select instead of a square).
+    bool     isReroute{false};
+    Id       rerouteSlotId{0};   // valid only when isReroute (used to find dot center)
     // Pointer to user's master copy of pos — updated on drag at EndNode
     ImVec2*  userPosPtr{nullptr};
 };
@@ -306,7 +311,8 @@ struct Context {
     // when inside BeginCanvas) — same space used by node lastNodeRect and
     // link cached endpoints.
     bool        pendingBgClick{false};
-    ImVec2      pendingBgClickPos{};               // local-space
+    ImVec2      pendingBgClickPos{};               // local-space (au moment du clic)
+    ImVec2      pendingBgClickPosScreen{};         // screen-space (pour le seuil de drag)
     bool        boxSelectActive{false};
     Id          boxSelectGraphId{0};
     ImVec2      boxSelectStart{};                  // local-space
@@ -753,7 +759,15 @@ IMNODAL_API void EndCanvas() {
     // Background interaction flags: computed now that mouse is back in screen
     // space, all user items are emitted, and our own layout Dummy is not yet.
     rCtx.hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(rCtx.widgetRect.Min, rCtx.widgetRect.Max);
-    const bool onEmpty = rCtx.hovered && !ImGui::IsAnyItemHovered() && !rCtx.isPanning;
+    // "onEmpty" = vraiment sur du fond : pas d'item ImGui hovered (couvre
+    // nodes/slots qui ont des ItemAdd) ET pas de LIEN hovered (les liens
+    // sont dessines via DrawList sans ItemAdd, donc IsAnyItemHovered les
+    // ignore — sans ce check, double-cliquer sur un lien ferait aussi fire
+    // bgDoubleClicked et declencherait l'action "fit-to-view" du host).
+    const bool onEmpty = rCtx.hovered &&
+                         !ImGui::IsAnyItemHovered() &&
+                         rCtx.currentHoveredLink == 0 &&
+                         !rCtx.isPanning;
     if (onEmpty) {
         rCtx.bgClicked          = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
         rCtx.bgDoubleClicked    = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
@@ -1031,6 +1045,58 @@ static bool s_multiSelectHeld(const GraphState& arGraph) {
     return arGraph.settings.allowMultiSelect && ImGui::IsKeyDown(arGraph.settings.multiSelectKey);
 }
 
+// -----------------------------
+// Box-select hit helpers (intersection-based)
+// -----------------------------
+
+// Slab method : true if the line segment (aA, aB) intersects the AABB
+// (aMin, aMax). Returns true if either endpoint is inside, OR if the segment
+// crosses the box. Used by the box-select to test bezier samples chord by
+// chord — catches cases where the curve dips into the box between samples.
+static bool s_segmentIntersectsRect(const ImVec2& aA, const ImVec2& aB,
+                                    const ImVec2& aMin, const ImVec2& aMax) {
+    const auto inside = [&](const ImVec2& p) {
+        return p.x >= aMin.x && p.x <= aMax.x && p.y >= aMin.y && p.y <= aMax.y;
+    };
+    if (inside(aA) || inside(aB)) return true;
+    const ImVec2 d(aB.x - aA.x, aB.y - aA.y);
+    float tMin = 0.0f, tMax = 1.0f;
+    auto clip = [&](float dirP, float minP, float maxP, float startP) {
+        if (std::fabs(dirP) < 1e-6f) return !(startP < minP || startP > maxP);
+        float t1 = (minP - startP) / dirP;
+        float t2 = (maxP - startP) / dirP;
+        if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+        if (t1 > tMin) tMin = t1;
+        if (t2 < tMax) tMax = t2;
+        return tMin <= tMax;
+    };
+    if (!clip(d.x, aMin.x, aMax.x, aA.x)) return false;
+    if (!clip(d.y, aMin.y, aMax.y, aA.y)) return false;
+    return tMin <= 1.0f && tMax >= 0.0f;
+}
+
+// Sample the cubic bezier into N chords and return true as soon as one
+// chord intersects the AABB. Catches all curve-vs-box overlaps including
+// when the curve only clips a corner of the box.
+static bool s_bezierIntersectsRect(const ImVec2& aP0, const ImVec2& aP1,
+                                   const ImVec2& aP2, const ImVec2& aP3,
+                                   const ImVec2& aMin, const ImVec2& aMax) {
+    constexpr int kSamples = 32;
+    ImVec2 prev = aP0;
+    for (int i = 1; i <= kSamples; ++i) {
+        const float t = (float)i / (float)kSamples;
+        const float u = 1.0f - t;
+        const ImVec2 pt =
+            aP0 * (u * u * u) +
+            aP1 * (3.0f * u * u * t) +
+            aP2 * (3.0f * u * t * t) +
+            aP3 * (t * t * t);
+        if (s_segmentIntersectsRect(prev, pt, aMin, aMax)) return true;
+        prev = pt;
+    }
+    return false;
+}
+
 }  // namespace
 
 // -----------------------------
@@ -1098,21 +1164,33 @@ IMNODAL_API void EndGraph() {
     const bool lmbOnCanvas = ImGui::IsWindowHovered() && rCtx.widgetRect.Contains(rCtx.mousePosBackup);
     const ImVec2 mouseLocal = ImGui::GetIO().MousePos;
 
-    // Phase 1: arm a pending bg-click on empty-canvas mouse-down.
+    // Phase 1: arm a pending bg-click on empty-canvas mouse-down. On stocke
+    // la position en LOCAL-SPACE (pour le rendu de la box) ET en SCREEN-SPACE
+    // (pour le seuil de drag — immune aux pan/zoom du canvas qui peuvent
+    // intervenir entre le clic et le check, par exemple si le double-clic
+    // declenche un fit-to-view : le canvas-space mouse "saute" alors que la
+    // souris ecran n'a pas bouge ; on ne veut pas armer un box-select pour
+    // ce mouvement parasite).
     if (lmbClicked && lmbOnCanvas && !rGraph.clickConsumedThisFrame && !rCtx.isPanning) {
         rCtx.pendingBgClick = true;
         rCtx.pendingBgClickPos = mouseLocal;
+        rCtx.pendingBgClickPosScreen = rCtx.mousePosBackup;
     }
 
     // Phase 2: promote pending click to box-select once drag distance crosses
-    // the threshold (in screen pixels, hence the multiply by scale).
+    // the threshold. On compare en SCREEN-SPACE (mousePosBackup vs la position
+    // screen au clic) ; le seuil est en pixels ecran sans dependre du zoom.
     if (rCtx.pendingBgClick && lmbDown && !rCtx.boxSelectActive && rGraph.settings.allowBoxSelect) {
-        const ImVec2 d = mouseLocal - rCtx.pendingBgClickPos;
-        const float thresholdLocal = 4.0f / (rCtx.scale > 0.0f ? rCtx.scale : 1.0f);
-        if ((d.x * d.x + d.y * d.y) > (thresholdLocal * thresholdLocal)) {
+        const ImVec2 d = rCtx.mousePosBackup - rCtx.pendingBgClickPosScreen;
+        constexpr float kThreshold = 4.0f;  // screen-pixels
+        if ((d.x * d.x + d.y * d.y) > (kThreshold * kThreshold)) {
             rCtx.boxSelectActive  = true;
             rCtx.boxSelectGraphId = rGraph.id;
-            rCtx.boxSelectStart   = rCtx.pendingBgClickPos;
+            // Le start de la box doit etre en CANVAS-SPACE actuel : on
+            // re-projette la position screen au clic via la transform
+            // courante (qui peut avoir change si le canvas a zoome entre
+            // temps — sinon equivalent a pendingBgClickPos).
+            rCtx.boxSelectStart = (rCtx.pendingBgClickPosScreen - rCtx.viewTransformPos) * rCtx.invScale;
         }
     }
 
@@ -1135,27 +1213,33 @@ IMNODAL_API void EndGraph() {
             const bool toggle = s_multiSelectHeld(rGraph);
             if (!toggle) s_clearSelection(rGraph);
 
-            // Hit nodes by center.
+            // Nodes : selectionnes des que leur rect VISUEL intersecte le box
+            // (overlap AABB-AABB). Plus tolerant que "centre dans le box" :
+            // un coin du node qui touche le box suffit.
             for (const auto& kv : rCtx.nodes) {
                 if (kv.second.graphId != rGraph.id) continue;
                 const ImRect& r = kv.second.lastScreenRect;
                 if (r.Min.x >= r.Max.x) continue;
-                const ImVec2 c((r.Min.x + r.Max.x) * 0.5f, (r.Min.y + r.Max.y) * 0.5f);
-                if (c.x >= mn.x && c.x <= mx.x && c.y >= mn.y && c.y <= mx.y) {
+                const bool overlaps =
+                    r.Min.x <= mx.x && r.Max.x >= mn.x &&
+                    r.Min.y <= mx.y && r.Max.y >= mn.y;
+                if (overlaps) {
                     if (rGraph.selectedNodes.insert(kv.first).second) {
                         rGraph.lastSelectedNode = kv.first;
                         rGraph.selectionChangedThisFrame = true;
                     }
                 }
             }
-            // Hit links: both endpoints in box.
+            // Links : selectionnes des que la spline (le bezier cache) touche
+            // le box, meme partiellement. On sample en chords et on teste
+            // chord-vs-rect — un seul "frolement" suffit.
             for (const auto& kv : rCtx.links) {
                 if (kv.second.graphId != rGraph.id) continue;
-                const ImVec2 a = kv.second.cachedFromPos;
-                const ImVec2 b = kv.second.cachedToPos;
-                const bool aIn = (a.x >= mn.x && a.x <= mx.x && a.y >= mn.y && a.y <= mx.y);
-                const bool bIn = (b.x >= mn.x && b.x <= mx.x && b.y >= mn.y && b.y <= mx.y);
-                if (aIn && bIn) {
+                if (!kv.second.bezierCached) continue;
+                if (s_bezierIntersectsRect(
+                        kv.second.cachedFromPos, kv.second.cachedP1,
+                        kv.second.cachedP2,     kv.second.cachedToPos,
+                        mn, mx)) {
                     if (rGraph.selectedLinks.insert(kv.first).second) {
                         rGraph.lastSelectedLink = kv.first;
                         rGraph.selectionChangedThisFrame = true;
@@ -1191,8 +1275,18 @@ IMNODAL_API void EndGraph() {
             auto it = rCtx.slots.find(sid);
             if (it == rCtx.slots.end()) continue;
             const SlotState& s = it->second;
-            // Hover frame, behind the dot.
-            if (s.hovered && s.lastHitRect.Min.x < s.lastHitRect.Max.x) {
+            // Pour un slot dont le node parent est un reroute : pas de halo
+            // de hover etendu — il prendrait la place de la frame de selection
+            // (qui est un peu plus grande que le dot) et le user ne pourrait
+            // plus cliquer DANS la zone du frame pour selectionner. On laisse
+            // juste le dot changer de couleur via dotColorHovered (le seul
+            // retour visuel sur reroute, comme dans Unreal).
+            bool isOnReroute = false;
+            if (s.parentNode != 0) {
+                auto nIt = rCtx.nodes.find(s.parentNode);
+                if (nIt != rCtx.nodes.end()) isOnReroute = nIt->second.isReroute;
+            }
+            if (s.hovered && !isOnReroute && s.lastHitRect.Min.x < s.lastHitRect.Max.x) {
                 pDrawList->AddRectFilled(s.lastHitRect.Min, s.lastHitRect.Max, kHoverFill, kHoverRounding);
                 pDrawList->AddRect(s.lastHitRect.Min, s.lastHitRect.Max, kHoverBorder, kHoverRounding, 0, 1.0f);
             }
@@ -1237,6 +1331,8 @@ IMNODAL_API bool BeginNode(Id aNodeId, ImVec2* apPos, const NodeSettings& arSett
     rNode.settings = arSettings;
     rNode.hasHeader = false;
     rNode.bodyColumnOpened = false;
+    rNode.isReroute = false;        // BeginRerouteNode re-set this AFTER BeginNode if needed
+    rNode.rerouteSlotId = 0;
     rNode.userPosPtr = apPos;
 
     // Sync position from user's storage
@@ -1280,8 +1376,22 @@ IMNODAL_API void EndNode() {
     const ImVec2 nodeMax(contentMax.x + pad, contentMax.y + pad);
     rNode.size = nodeMax - nodeMin;
 
-    // Hover test against the full visual rect
-    rNode.hovered = ImGui::IsMouseHoveringRect(nodeMin, nodeMax) && ImGui::IsWindowHovered();
+    // Hover test : rect classique sauf pour les reroutes qui sont circulaires
+    // -> distance au centre du dot, rayon legerement superieur a la zone visuelle.
+    if (rNode.isReroute) {
+        auto sIt = rCtx.slots.find(rNode.rerouteSlotId);
+        const ImVec2 center = (sIt != rCtx.slots.end())
+            ? sIt->second.screenPos
+            : ImVec2((nodeMin.x + nodeMax.x) * 0.5f, (nodeMin.y + nodeMax.y) * 0.5f);
+        const float dotR  = (sIt != rCtx.slots.end()) ? sIt->second.dotRadius : 5.0f;
+        const float hitR  = dotR + 6.0f;
+        const ImVec2 mp   = ImGui::GetIO().MousePos;
+        const float dx = mp.x - center.x;
+        const float dy = mp.y - center.y;
+        rNode.hovered = (dx * dx + dy * dy <= hitR * hitR) && ImGui::IsWindowHovered();
+    } else {
+        rNode.hovered = ImGui::IsMouseHoveringRect(nodeMin, nodeMax) && ImGui::IsWindowHovered();
+    }
     if (rNode.hovered) {
         rCtx.currentHoveredNode = rCtx.currentNodeId;
     }
@@ -1351,7 +1461,20 @@ IMNODAL_API void EndNode() {
     }
     // Border (selected color overrides)
     const ImU32 borderCol = rNode.selected ? rNode.settings.selectedBorderColor : rNode.settings.borderColor;
-    pDrawList->AddRect(nodeMin, nodeMax, borderCol, rounding, 0, rNode.settings.borderThickness);
+    if (rNode.isReroute) {
+        // Frame circulaire au centre du dot. Toujours dessinee (alpha de
+        // borderColor par defaut deja faible -> faint frame en permanence ;
+        // selectedBorderColor plus opaque -> highlight a la selection).
+        auto sIt = rCtx.slots.find(rNode.rerouteSlotId);
+        const ImVec2 center = (sIt != rCtx.slots.end())
+            ? sIt->second.screenPos
+            : ImVec2((nodeMin.x + nodeMax.x) * 0.5f, (nodeMin.y + nodeMax.y) * 0.5f);
+        const float dotR  = (sIt != rCtx.slots.end()) ? sIt->second.dotRadius : 5.0f;
+        const float ringR = dotR + 6.0f;
+        pDrawList->AddCircle(center, ringR, borderCol, 0, rNode.settings.borderThickness);
+    } else {
+        pDrawList->AddRect(nodeMin, nodeMax, borderCol, rounding, 0, rNode.settings.borderThickness);
+    }
 
     // Hover-only drag handle bar — shown only when mouse is on the node.
     // Used by reroute-style nodes that have no header: gives the user a visible
@@ -1628,11 +1751,27 @@ IMNODAL_API void EndSlot() {
     rCtx.slotPivotAlignment = ImVec2(-1.0f, -1.0f);
     rCtx.slotPivotOffset    = ImVec2(0.0f, 0.0f);
 
-    // Hit area: full group rect, expanded by the dot halo on its side.
-    const float pad = rSlot.dotRadius + 4.0f;
-    const ImRect hitBB(
-        ImMin(gMin, rSlot.screenPos - ImVec2(pad, pad)),
-        ImMax(gMax, rSlot.screenPos + ImVec2(pad, pad)));
+    // Hit area : par defaut tout le rect du groupe + un halo autour du dot.
+    // EXCEPTION pour un slot de reroute : on restreint au DOT lui-meme. Sinon
+    // la zone autour du dot serait happee par le slot (= drag de lien) et le
+    // user ne pourrait plus cliquer "a cote" pour selectionner / bouger le
+    // node. UE-style : hover sur le dot = lien, hover sur le reste = node.
+    bool slotOnReroute = false;
+    if (rCtx.currentNodeId != 0) {
+        auto nIt = rCtx.nodes.find(rCtx.currentNodeId);
+        if (nIt != rCtx.nodes.end()) slotOnReroute = nIt->second.isReroute;
+    }
+    ImRect hitBB;
+    if (slotOnReroute) {
+        const float r = rSlot.dotRadius;
+        hitBB = ImRect(rSlot.screenPos - ImVec2(r, r),
+                       rSlot.screenPos + ImVec2(r, r));
+    } else {
+        const float pad = rSlot.dotRadius + 4.0f;
+        hitBB = ImRect(
+            ImMin(gMin, rSlot.screenPos - ImVec2(pad, pad)),
+            ImMax(gMax, rSlot.screenPos + ImVec2(pad, pad)));
+    }
     // Cache for next frame's BeginSlot early hover test + EndGraph hover frame.
     rSlot.lastHitRect = hitBB;
 
@@ -1937,8 +2076,12 @@ IMNODAL_API void Link(Id aLinkId, Id aFromSlotId, Id aToSlotId, ImU32 aColor, fl
     const float hitThreshold = ImMax(aThickness * 2.0f, 6.0f / canvasScale);
 
     rLink.hovered = s_isMouseOnBezier(rFrom.screenPos, p1, p2, rTo.screenPos, mouse, hitThreshold);
-    rLink.clicked = false;
-    rLink.doubleClicked = false;
+    // NB : on NE reset PAS clicked / doubleClicked ici. NewFrame s'en charge
+    // au debut de chaque frame. Si plusieurs Link() sont appeles avec le meme
+    // segment id (= un segment partage entre plusieurs BaseLink, fusion
+    // visuelle), le PREMIER appel detecte le clic et le set a true ; les
+    // suivants ne re-entrent pas dans la branche canConsume (clickConsumed
+    // est deja a true) et ecraseraient l'etat a false si on resetait ici.
     if (rLink.hovered) {
         rCtx.currentHoveredLink = aLinkId;
     }
@@ -2285,9 +2428,17 @@ IMNODAL_API bool BeginDelete() {
 
     const bool ctrl          = ImGui::IsKeyDown(ImGuiMod_Ctrl) || ImGui::IsKeyDown(ImGuiMod_Super);
     const bool ctrlX         = ctrl && ImGui::IsKeyPressed(ImGuiKey_X, false);
-    const bool deletePressed = ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace) || ctrlX;
+    // repeat=false : on ne veut PAS que delete fire 10x si l'utilisateur tient
+    // la touche enfoncee. Une seule deletion par appui.
+    const bool deletePressed = ImGui::IsKeyPressed(ImGuiKey_Delete, false) ||
+                               ImGui::IsKeyPressed(ImGuiKey_Backspace, false) ||
+                               ctrlX;
     const bool canvasHovered = rCtx.hovered;  // computed by EndCanvas of last frame
-    if (deletePressed && canvasHovered) {
+    // WantCaptureKeyboard : un widget ImGui (text input ailleurs, etc.) capte
+    // le clavier. Backspace tape la-bas ne doit pas faire deleter notre
+    // selection canvas — meme si la souris survole le canvas par hasard.
+    const bool kbCaptured = ImGui::GetIO().WantCaptureKeyboard;
+    if (deletePressed && canvasHovered && !kbCaptured) {
         for (Id id : g.selectedLinks) rCtx.pendingDeleteLinks.push_back(id);
         for (Id id : g.selectedNodes) rCtx.pendingDeleteNodes.push_back(id);
     }
@@ -2683,23 +2834,33 @@ IMNODAL_API void NavigateToSelection(bool aZoomToFit, float aMarginRatio) {
 
 IMNODAL_API bool BeginRerouteNode(Id aNodeId, Id aSlotId, ImVec2* apPos, const NodeSettings& arSettings, ImU32 aDotColor) {
     NodeSettings reSettings = arSettings;
-    // Reroute UE-style : seul le dot est visible en etat normal. Le rect du
-    // node est totalement transparent (bodyColor / borderColor a alpha 0) mais
-    // continue a capter le hover/drag — c'est ce qui permet de cliquer "autour"
-    // du dot pour selectionner et bouger le reroute. Quand le reroute est
-    // selectionne, selectedBorderColor (jaune opaque) trace une frame autour ;
-    // c'est cette frame visible qui matérialise la zone draggable, sans polluer
-    // le graphe a l'etat repos.
+    // Reroute UE-style : un dot bien visible + une frame circulaire LEGEREMENT
+    // transparente en permanence pour materialiser la zone draggable, meme
+    // au repos (sans polluer le rendu — l'alpha est faible). Quand le reroute
+    // est selectionne, la frame passe en jaune semi-opaque (selectedBorderColor).
+    // Le body et le header restent totalement transparents.
     reSettings.bodyColor           = IM_COL32(0, 0, 0, 0);
     reSettings.headerColor         = IM_COL32(0, 0, 0, 0);
-    reSettings.borderColor         = IM_COL32(0, 0, 0, 0);
-    reSettings.selectedBorderColor = IM_COL32(255, 180, 0, 255);
+    reSettings.borderColor         = IM_COL32(220, 220, 220, 70);   // faint white-ish frame
+    reSettings.selectedBorderColor = IM_COL32(255, 180, 0, 200);    // yellow, slightly transparent
     reSettings.borderThickness     = 1.5f;
     reSettings.rounding            = 3.0f;
     reSettings.drawHoverHandle     = false;
 
     if (!BeginNode(aNodeId, apPos, reSettings)) {
         return false;
+    }
+
+    // Marque le node comme reroute pour que EndNode dessine la frame de
+    // selection en CERCLE (au lieu du rect par defaut), et pour que le halo
+    // de hover du slot interne soit aussi un cercle dans EndGraph.
+    {
+        Context& rCtx = s_getCtx();
+        auto it = rCtx.nodes.find(aNodeId);
+        if (it != rCtx.nodes.end()) {
+            it->second.isReroute = true;
+            it->second.rerouteSlotId = aSlotId;
+        }
     }
 
     // Slot dot color : if the host passed a link-matching color, use it for
