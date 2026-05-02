@@ -260,6 +260,27 @@ IMNODAL_API bool BeginCenter();  IMNODAL_API void EndCenter();
 IMNODAL_API bool BeginOutputs(); IMNODAL_API void EndOutputs();
 IMNODAL_API bool BeginFooter();  IMNODAL_API void EndFooter();
 
+// Layout container that horizontally aligns whatever ImGui widgets are
+// emitted between Begin and End. Use it to center a title in a header, push
+// a label to the right of the footer, or align any group of widgets within
+// a row. The widgets are real ImGui widgets — full styling (PushStyleColor,
+// fonts, hovering, clicking, custom draw) works as usual.
+//
+//   ratio: 0.0 = left, 0.5 = center, 1.0 = right (along the X axis)
+//   availableWidth:
+//     - > 0 : explicit width to align within
+//     - 0   : auto. Inside a node → use the node's width (from the previous
+//             frame's EndNode); outside → ImGui::GetContentRegionAvail().x
+//
+// Implementation note: alignment uses the group's width MEASURED on the
+// PREVIOUS frame to compute this frame's indent. The first frame a given
+// scope is laid out, the contents are left-aligned (no measurement yet);
+// from the second frame on, alignment is correct. Width changes between
+// frames produce a 1-frame visual lag — fine for most node layouts, since
+// the node size itself follows the same lag.
+IMNODAL_API void BeginAlign(float aRatio, float aAvailableWidth = 0.0f);
+IMNODAL_API void EndAlign();
+
 // -----------------------------
 // Slot (primitive — usable anywhere)
 // -----------------------------
@@ -272,13 +293,15 @@ struct SlotSettings {
     SlotSettings() = default;
 };
 
-// Render a slot. Positioning behavior depends on the current "pin mode":
-//   - inside BeginInputs()  → dot pinned to the node's left edge
-//   - inside BeginOutputs() → dot pinned to the node's right edge
-//   - anywhere else         → dot inline next to the label/widget
+// Render a slot as an inline button-like widget. The dot position relative
+// to the label/widget depends on the slot role:
+//   - SlotRole_Input  → dot on the left, before the label/widget
+//   - SlotRole_Output → dot on the right, after the label/widget
+//   - SlotRole_InOut  → dot centered on the group rect
 //
 // Dot Y is always centered on the group rect of everything emitted between
-// BeginSlot and EndSlot.
+// BeginSlot and EndSlot. BeginInputs / BeginCenter / BeginOutputs are pure
+// 3-column layout helpers and no longer alter the slot's positioning.
 IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const char* aLabel, const SlotSettings& arSettings = {});
 IMNODAL_API void EndSlot();
 // Convenience wrappers
@@ -330,20 +353,164 @@ IMNODAL_API SlotRole GetSlotRole(Id aSlotId);              // useful for rule ch
 //             } else {
 //                 RejectNewLink("type mismatch");
 //             }
+//         } else if (QueryNewNodeFromSlot(&from)) {
+//             // user dropped on empty canvas — typically open a "create node
+//             // connected to `from`" popup, then on next frame call AcceptNewNodeFromSlot
+//             if (AcceptNewNodeFromSlot()) { open_node_creation_popup(from); }
 //         }
 //         EndConnectionCreate();
 //     }
 //
 // BeginConnectionCreate returns true as soon as the user starts dragging from
 // a slot. QueryNewLink returns true every frame while a compatible target slot
-// is hovered. AcceptNewLink lights the preview green and returns true once on
-// the frame the mouse is released (commit). RejectNewLink paints it red.
+// is hovered. QueryNewNodeFromSlot returns true while the drag is on empty
+// canvas (no slot under cursor). AcceptNewLink/AcceptNewNodeFromSlot light the
+// preview green and return true once on the frame the mouse is released
+// (commit). RejectNewLink paints it red.
 
 IMNODAL_API bool BeginConnectionCreate();
 IMNODAL_API bool QueryNewLink(Id* apoFromSlotId, Id* apoToSlotId);
+IMNODAL_API bool QueryNewNodeFromSlot(Id* apoFromSlotId);
 IMNODAL_API bool AcceptNewLink(ImU32 aColor = 0);
+IMNODAL_API bool AcceptNewNodeFromSlot(ImU32 aColor = 0);
 IMNODAL_API void RejectNewLink(const char* aReason = nullptr);
 IMNODAL_API void EndConnectionCreate();
+
+// =====================================================================
+// Multi-selection
+// =====================================================================
+// Selection is a SET of node ids and a SET of link ids per graph. Shift +
+// left-click on a node/link toggles its membership in the set. The legacy
+// single-id Get/SetSelectedNode/Link helpers still work — they return the
+// "first" element / replace the whole set respectively.
+IMNODAL_API int  GetSelectedObjectCount();
+IMNODAL_API int  GetSelectedNodes(Id* apoBuffer, int aCapacity);   // returns count written
+IMNODAL_API int  GetSelectedLinks(Id* apoBuffer, int aCapacity);
+IMNODAL_API bool HasSelectionChanged();                            // true on the frame the selection changed
+IMNODAL_API void AddToSelection(Id aId);                           // node OR link id; ImNodal looks it up
+IMNODAL_API void RemoveFromSelection(Id aId);
+IMNODAL_API void ClearSelection();
+
+// =====================================================================
+// Direct hover queries
+// =====================================================================
+IMNODAL_API Id GetHoveredSlot();   // 0 if none
+IMNODAL_API Id GetHoveredNode();   // 0 if none
+IMNODAL_API Id GetHoveredLink();   // 0 if none
+
+// =====================================================================
+// Context-menu requests (right-click on a specific item)
+// =====================================================================
+// Each returns true on the frame the user right-clicked the corresponding
+// item. The caller typically opens an ImGui popup using the returned id.
+IMNODAL_API bool IsNodeContextMenuRequested(Id* apoNodeId);
+IMNODAL_API bool IsSlotContextMenuRequested(Id* apoSlotId);
+IMNODAL_API bool IsLinkContextMenuRequested(Id* apoLinkId);
+
+// =====================================================================
+// Delete state machine
+// =====================================================================
+// Triggered by the Delete key (deletes everything currently selected). Mirrors
+// thedmd's BeginDelete API. Use Accept/Reject once per Query result; the
+// caller is responsible for actually removing the entity from its data and
+// will simply stop emitting it on the next frame.
+//
+//     if (BeginDelete()) {
+//         Id linkId;
+//         while (QueryDeletedLink(&linkId)) {
+//             if (allow_link_delete(linkId)) AcceptDelete();
+//             else                            RejectDelete();
+//         }
+//         Id nodeId;
+//         while (QueryDeletedNode(&nodeId)) {
+//             if (allow_node_delete(nodeId)) AcceptDelete();
+//             else                            RejectDelete();
+//         }
+//         EndDelete();
+//     }
+IMNODAL_API bool BeginDelete();
+IMNODAL_API bool QueryDeletedLink(Id* apoLinkId);
+IMNODAL_API bool QueryDeletedNode(Id* apoNodeId);
+IMNODAL_API bool AcceptDelete();
+IMNODAL_API void RejectDelete();
+IMNODAL_API void EndDelete();
+
+// =====================================================================
+// Shortcut machine (Ctrl+C/V/X/D/A) — call between BeginGraph/EndGraph
+// =====================================================================
+// AcceptXxx returns true exactly on the frame the corresponding shortcut
+// fired. Use GetActionContextNodes/Links to know which entities are in scope
+// for the shortcut — ImNodal uses the current selection at trigger time.
+//
+//     if (BeginShortcut()) {
+//         if      (AcceptCopy())      do_copy();
+//         else if (AcceptPaste())     do_paste();
+//         else if (AcceptCut())       do_cut();
+//         else if (AcceptDuplicate()) do_duplicate();
+//         else if (AcceptSelectAll()) do_select_all();
+//         EndShortcut();
+//     }
+IMNODAL_API bool BeginShortcut();
+IMNODAL_API bool AcceptCopy();
+IMNODAL_API bool AcceptPaste();
+IMNODAL_API bool AcceptCut();
+IMNODAL_API bool AcceptDuplicate();
+IMNODAL_API bool AcceptSelectAll();
+IMNODAL_API void EndShortcut();
+IMNODAL_API int  GetActionContextNodes(Id* apoBuffer, int aCapacity);
+IMNODAL_API int  GetActionContextLinks(Id* apoBuffer, int aCapacity);
+
+// =====================================================================
+// Flow animation on a link
+// =====================================================================
+// Call right AFTER Link(...) for the same id. Draws moving dots along the
+// curve. Speed is in canvas units per second. aColor==0 picks a default
+// accent based on the link color.
+IMNODAL_API void FlowLink(Id aLinkId, float aSpeed = 200.0f, ImU32 aColor = 0);
+
+// =====================================================================
+// Per-node draw lists (custom overlays under or above node content)
+// =====================================================================
+// Returns the canvas's draw list with the active channel switched to the
+// matching z-level. Call between BeginNode and EndNode, draw your shapes
+// IMMEDIATELY, and do NOT emit ImGui widgets afterwards until the next
+// ImNodal call (which will restore the channel). Typical use: a colored
+// header band, a debug highlight, a progress bar overlay.
+IMNODAL_API ImDrawList* GetNodeBackgroundDrawList(Id aNodeId);   // under content, above node body
+IMNODAL_API ImDrawList* GetNodeForegroundDrawList(Id aNodeId);   // above content, below overlay
+IMNODAL_API ImRect      GetNodeRect(Id aNodeId);                 // last-frame screen-space rect
+
+// =====================================================================
+// Slot dot pivot control (override default placement)
+// =====================================================================
+// Call between BeginSlot and EndSlot to override the dot position. The
+// override applies to the current slot only and resets at EndSlot.
+//   - alignment: position within the slot's group rect (0,0 = top-left,
+//                1,1 = bottom-right). Pass (-1,-1) to use the role default.
+//   - offset:    additional pixel offset added on top of alignment.
+IMNODAL_API void SlotDotPivotAlignment(const ImVec2& aAlignment);
+IMNODAL_API void SlotDotPivotOffset(const ImVec2& aOffsetPx);
+
+// Convenience: anchor the dot to a named edge of the slot group rect.
+// Equivalent to a SlotDotPivotAlignment() call with the matching value.
+enum SlotDotEdge_ {
+    SlotDotEdge_Auto   = 0,  // role default (Input → left, Output → right, InOut → center)
+    SlotDotEdge_Left   = 1,
+    SlotDotEdge_Right  = 2,
+    SlotDotEdge_Top    = 3,
+    SlotDotEdge_Bottom = 4,
+    SlotDotEdge_Center = 5,
+};
+typedef int SlotDotEdge;
+IMNODAL_API void SlotDotAnchorEdge(SlotDotEdge aEdge);
+
+// =====================================================================
+// Navigation helpers
+// =====================================================================
+// Recenter (and optionally zoom) the canvas on the bounding box of all
+// nodes, or only the current selection. Call inside BeginCanvas scope.
+IMNODAL_API void NavigateToContent(bool aZoomToFit = true, float aMarginRatio = 0.1f);
+IMNODAL_API void NavigateToSelection(bool aZoomToFit = true, float aMarginRatio = 0.25f);
 
 // =====================================================================
 // Reroute node (M2)
@@ -356,7 +523,10 @@ IMNODAL_API void EndConnectionCreate();
 // and output. The node shows a hover-only drag handle bar (visible only when
 // the mouse is over the node) so you can move it around. Typically paired
 // with double-click-on-link to split a link at a given point.
-IMNODAL_API bool BeginRerouteNode(Id aNodeId, Id aSlotId, ImVec2* apPos, const NodeSettings& arSettings = {});
+// aDotColor: when non-zero, used as the dot's connected color so a reroute on
+// a typed link visually matches the link's color (Unreal-style). When zero,
+// the default greyish dot is kept. The selected/hovered states apply on top.
+IMNODAL_API bool BeginRerouteNode(Id aNodeId, Id aSlotId, ImVec2* apPos, const NodeSettings& arSettings = {}, ImU32 aDotColor = 0);
 IMNODAL_API void EndRerouteNode();
 
 }  // namespace ImNodal
