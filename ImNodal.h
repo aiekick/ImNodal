@@ -82,6 +82,101 @@ IMNODAL_API void     SetCurrentContext(Context* apCtx);
 IMNODAL_API void     NewFrame();
 
 // =====================================================================
+// Style — ImGui-style theming (Push/Pop colors and vars)
+// =====================================================================
+// All visual aspects (colors + numeric appearance vars) live in Style.
+// Read via GetStyleColorU32 / GetStyleVarFloat / GetStyleVarVec2, override
+// temporarily via PushStyleColor / PushStyleVar (matching the ImGui pattern).
+// Settings structs (CanvasSettings / NodeSettings / SlotSettings /
+// GraphSettings) only carry BEHAVIOR (mouse buttons, keys, modes) — never
+// appearance.
+
+enum ImNodalCol_ {
+    ImNodalCol_GridLine = 0,
+    ImNodalCol_GridSubLine,
+    ImNodalCol_NodeBody,
+    ImNodalCol_NodeHeader,                 // default header tint when host doesn't push a per-node color
+    ImNodalCol_NodeBorder,
+    ImNodalCol_NodeBorderSelected,
+    ImNodalCol_NodeHoverHandle,
+    ImNodalCol_SlotDot,
+    ImNodalCol_SlotDotConnected,
+    ImNodalCol_SlotDotHovered,
+    ImNodalCol_SlotHoverFill,
+    ImNodalCol_SlotHoverBorder,
+    ImNodalCol_Link,                       // default link color (when host passes 0)
+    ImNodalCol_LinkHovered,
+    ImNodalCol_LinkSelected,
+    ImNodalCol_RerouteBorder,              // faint frame at rest
+    ImNodalCol_RerouteBorderSelected,
+    ImNodalCol_BoxSelectFill,
+    ImNodalCol_BoxSelectBorder,
+    ImNodalCol_LinkPreviewIdle,            // wire color while dragging, no target hovered
+    ImNodalCol_LinkPreviewAccept,          // wire color when AcceptNewLink fired
+    ImNodalCol_LinkPreviewReject,          // wire color when RejectNewLink fired
+    ImNodalCol_FlowDot,                    // moving dot color along FlowLink
+    ImNodalCol_COUNT,
+};
+typedef int ImNodalCol;
+
+enum ImNodalStyleVar_ {
+    ImNodalStyleVar_NodeRounding = 0,      // float
+    ImNodalStyleVar_NodeBorderThickness,   // float
+    ImNodalStyleVar_NodeHeaderPadding,     // float
+    ImNodalStyleVar_NodeBodyPadding,       // float
+    ImNodalStyleVar_NodeColumnSpacing,     // float
+    ImNodalStyleVar_NodeHoverHandleHeight, // float
+    ImNodalStyleVar_SlotDotRadius,         // float
+    ImNodalStyleVar_LinkThickness,         // float (default when Link() gets thickness=0)
+    ImNodalStyleVar_GridSize,              // ImVec2
+    ImNodalStyleVar_GridSubdivs,           // ImVec2
+    ImNodalStyleVar_COUNT,
+};
+typedef int ImNodalStyleVar;
+
+struct Style {
+    ImU32  Colors[ImNodalCol_COUNT];
+    float  NodeRounding;
+    float  NodeBorderThickness;
+    float  NodeHeaderPadding;
+    float  NodeBodyPadding;
+    float  NodeColumnSpacing;
+    float  NodeHoverHandleHeight;
+    float  SlotDotRadius;
+    float  LinkThickness;
+    ImVec2 GridSize;
+    ImVec2 GridSubdivs;
+
+    Style();  // applies sane dark-theme defaults
+};
+
+IMNODAL_API Style& GetStyle();
+IMNODAL_API ImU32  GetStyleColorU32(ImNodalCol aIdx);
+IMNODAL_API float  GetStyleVarFloat(ImNodalStyleVar aIdx);
+IMNODAL_API ImVec2 GetStyleVarVec2(ImNodalStyleVar aIdx);
+
+IMNODAL_API void PushStyleColor(ImNodalCol aIdx, ImU32 aCol);
+IMNODAL_API void PopStyleColor(int aCount = 1);
+
+IMNODAL_API void PushStyleVar(ImNodalStyleVar aIdx, float aVal);
+IMNODAL_API void PushStyleVar(ImNodalStyleVar aIdx, const ImVec2& aVal);
+IMNODAL_API void PopStyleVar(int aCount = 1);
+
+// Human-readable names for style enums (useful for editors / debug UI).
+IMNODAL_API const char* GetStyleColorName(ImNodalCol aIdx);
+IMNODAL_API const char* GetStyleVarName(ImNodalStyleVar aIdx);
+
+// Drop-in style editor widgets — meant to be embedded in the host's settings
+// UI (menu, panel, modal). They mutate ImNodal::GetStyle() in place; pair with
+// SetCurrentContext if multiple ImNodal contexts coexist.
+//   ShowStyleColorsEditor : one ColorEdit4 per ImNodalCol_, with a "Reset to
+//   defaults" button at the top.
+//   ShowStyleVarsEditor   : one DragFloat / DragFloat2 per ImNodalStyleVar_,
+//   with the same reset button.
+IMNODAL_API void ShowStyleColorsEditor();
+IMNODAL_API void ShowStyleVarsEditor();
+
+// =====================================================================
 // Canvas
 // =====================================================================
 
@@ -100,10 +195,6 @@ struct CanvasSettings {
 
     // Grid
     bool drawGrid{true};                                       // Auto-draw grid during Begin (can also be called manually)
-    ImVec2 gridSize{50.0f, 50.0f};                             // Major grid spacing in canvas units
-    ImVec2 gridSubdivs{5.0f, 5.0f};                            // Minor subdivisions per major cell (0 to disable)
-    ImU32 gridColor{IM_COL32(200, 200, 200, 40)};
-    ImU32 subGridColor{IM_COL32(200, 200, 200, 10)};
 
     CanvasSettings() = default;
 };
@@ -229,19 +320,15 @@ IMNODAL_API Id   GetCurrentGraphId();
 // -----------------------------
 // Node
 // -----------------------------
+// Header tint: by default, BeginNode reads ImNodalCol_NodeHeader from the
+// current style. To customize per-node, push the desired color before
+// BeginNode :
+//     ImNodal::PushStyleColor(ImNodalCol_NodeHeader, datas.color);
+//     ImNodal::BeginNode(id, &pos);
+//     ...
+//     ImNodal::EndNode();
+//     ImNodal::PopStyleColor();
 struct NodeSettings {
-    ImU32 headerColor{IM_COL32(60, 120, 180, 255)};
-    ImU32 bodyColor{IM_COL32(50, 50, 50, 230)};
-    ImU32 borderColor{IM_COL32(80, 80, 80, 255)};
-    ImU32 selectedBorderColor{IM_COL32(255, 180, 0, 255)};
-    ImU32 titleColor{IM_COL32(255, 255, 255, 255)};
-    ImU32 hoverHandleColor{IM_COL32(255, 255, 255, 120)};   // drawn when drawHoverHandle && hovered
-    float rounding{4.0f};
-    float borderThickness{1.5f};
-    float headerPadding{6.0f};
-    float bodyPadding{6.0f};
-    float columnSpacing{10.0f};   // between Inputs/Center/Outputs
-    float hoverHandleHeight{4.0f}; // height of the hover-only drag bar (reroute-style nodes)
     bool  movable{true};
     bool  hasInnerGraph{false};
     bool  drawHoverHandle{false}; // draw a drag bar on top of the node when hovered (reroute-style nodes)
@@ -284,11 +371,15 @@ IMNODAL_API void EndAlign();
 // -----------------------------
 // Slot (primitive — usable anywhere)
 // -----------------------------
+// Dot colors and radius come from the global Style by default. To customize
+// per-slot, push the colors before BeginSlot :
+//     ImNodal::PushStyleColor(ImNodalCol_SlotDot, datas.color);
+//     ImNodal::PushStyleColor(ImNodalCol_SlotDotConnected, datas.connected_color);
+//     ImNodal::BeginInputSlot(id, "label");
+//     ...
+//     ImNodal::EndSlot();
+//     ImNodal::PopStyleColor(2);
 struct SlotSettings {
-    ImU32 dotColor{IM_COL32(200, 200, 200, 255)};
-    ImU32 dotColorConnected{IM_COL32(255, 220, 0, 255)};
-    ImU32 dotColorHovered{IM_COL32(255, 255, 255, 255)};
-    float dotRadius{5.0f};
     uint32_t typeTag{0};   // user-chosen type tag (for M2 connection rules)
     SlotSettings() = default;
 };

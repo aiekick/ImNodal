@@ -48,11 +48,12 @@ struct SlotState {
     uint32_t  typeTag{0};
     ImVec2    screenPos{};      // dot center, committed at EndSlot
     ImVec2    tangent{};        // unit vector pointing away from the slot side
-    float     dotRadius{5.0f};
-    // Dot color snapshot taken from SlotSettings at BeginSlot time.
-    ImU32     dotColor{IM_COL32(200, 200, 200, 255)};
-    ImU32     dotColorConnected{IM_COL32(255, 220, 0, 255)};
-    ImU32     dotColorHovered{IM_COL32(255, 255, 255, 255)};
+    float     dotRadius{5.0f};  // snapshot of style.SlotDotRadius at BeginSlot
+    // Dot color snapshot taken from the current style at BeginSlot time
+    // (so per-slot PushStyleColor before BeginSlot works as expected).
+    ImU32     dotColor{0};
+    ImU32     dotColorConnected{0};
+    ImU32     dotColorHovered{0};
     // Hit rect in local-space, captured at EndSlot. Used by the next frame's
     // BeginSlot to set rSlot.hovered EARLY (so IsSlotHovered() works between
     // BeginSlot and EndSlot — typically where the host queries double-clicks)
@@ -85,6 +86,7 @@ struct NodeState {
     // reroutes (a small dot with a ring on hover/select instead of a square).
     bool     isReroute{false};
     Id       rerouteSlotId{0};   // valid only when isReroute (used to find dot center)
+    int      rerouteStyleColorPushes{0};  // # PushStyleColor faits par BeginRerouteNode, a Pop a EndRerouteNode
     // Pointer to user's master copy of pos — updated on drag at EndNode
     ImVec2*  userPosPtr{nullptr};
 };
@@ -149,8 +151,24 @@ struct GraphState {
 // Context (opaque publicly — declared in ImNodal.h)
 // =====================================================================
 
+// Style modification stack entries (one per Push call ; popped in reverse).
+struct ColorMod {
+    ImNodalCol idx;
+    ImU32      prev;
+};
+struct VarMod {
+    ImNodalStyleVar idx;
+    bool            isVec2;
+    float           prevF;
+    ImVec2          prevV2;
+};
+
 struct Context {
     bool active{false};
+
+    Style style;                          // global appearance state
+    std::vector<ColorMod> colorStack;     // PushStyleColor history
+    std::vector<VarMod>   varStack;       // PushStyleVar history
 
     CanvasSettings settings;
 
@@ -633,6 +651,280 @@ static void s_manageInteractions(Context& arCtx) {
 }  // namespace
 
 // =====================================================================
+// Style — defaults + Push/Pop API
+// =====================================================================
+
+Style::Style() {
+    // Defaults : sane dark-theme values matching what the lib used hardcoded
+    // before the style refactor. Tweak at runtime via GetStyle() or via the
+    // Push/Pop helpers.
+    Colors[ImNodalCol_GridLine]                = IM_COL32(200, 200, 200, 40);
+    Colors[ImNodalCol_GridSubLine]             = IM_COL32(200, 200, 200, 10);
+    Colors[ImNodalCol_NodeBody]                = IM_COL32( 50,  50,  50, 230);
+    Colors[ImNodalCol_NodeHeader]              = IM_COL32( 60, 120, 180, 255);
+    Colors[ImNodalCol_NodeBorder]              = IM_COL32( 80,  80,  80, 255);
+    Colors[ImNodalCol_NodeBorderSelected]      = IM_COL32(255, 180,   0, 255);
+    Colors[ImNodalCol_NodeHoverHandle]         = IM_COL32(255, 255, 255, 120);
+    Colors[ImNodalCol_SlotDot]                 = IM_COL32(200, 200, 200, 255);
+    Colors[ImNodalCol_SlotDotConnected]        = IM_COL32(255, 220,   0, 255);
+    Colors[ImNodalCol_SlotDotHovered]          = IM_COL32(255, 255, 255, 255);
+    Colors[ImNodalCol_SlotHoverFill]           = IM_COL32(255, 255, 255,  32);
+    Colors[ImNodalCol_SlotHoverBorder]         = IM_COL32(255, 255, 255, 110);
+    Colors[ImNodalCol_Link]                    = IM_COL32(220, 220, 220, 230);
+    Colors[ImNodalCol_LinkHovered]             = IM_COL32(255, 255, 255, 240);
+    Colors[ImNodalCol_LinkSelected]            = IM_COL32(255, 180,   0, 230);
+    Colors[ImNodalCol_RerouteBorder]           = IM_COL32(220, 220, 220,  70);
+    Colors[ImNodalCol_RerouteBorderSelected]   = IM_COL32(255, 180,   0, 200);
+    Colors[ImNodalCol_BoxSelectFill]           = IM_COL32(120, 200, 255,  40);
+    Colors[ImNodalCol_BoxSelectBorder]         = IM_COL32(120, 200, 255, 200);
+    Colors[ImNodalCol_LinkPreviewIdle]         = IM_COL32(220, 220, 220, 200);
+    Colors[ImNodalCol_LinkPreviewAccept]       = IM_COL32(120, 255, 120, 230);
+    Colors[ImNodalCol_LinkPreviewReject]       = IM_COL32(255,  80,  80, 230);
+    Colors[ImNodalCol_FlowDot]                 = IM_COL32(255, 220, 120, 255);
+
+    NodeRounding          = 4.0f;
+    NodeBorderThickness   = 1.5f;
+    NodeHeaderPadding     = 6.0f;
+    NodeBodyPadding       = 6.0f;
+    NodeColumnSpacing     = 10.0f;
+    NodeHoverHandleHeight = 4.0f;
+    SlotDotRadius         = 5.0f;
+    LinkThickness         = 3.0f;
+    GridSize              = ImVec2(50.0f, 50.0f);
+    GridSubdivs           = ImVec2( 5.0f,  5.0f);
+}
+
+IMNODAL_API Style& GetStyle() { return s_getCtx().style; }
+
+IMNODAL_API ImU32 GetStyleColorU32(ImNodalCol aIdx) {
+    if (aIdx < 0 || aIdx >= ImNodalCol_COUNT) return 0;
+    return s_getCtx().style.Colors[aIdx];
+}
+
+IMNODAL_API float GetStyleVarFloat(ImNodalStyleVar aIdx) {
+    Style& s = s_getCtx().style;
+    switch (aIdx) {
+        case ImNodalStyleVar_NodeRounding:          return s.NodeRounding;
+        case ImNodalStyleVar_NodeBorderThickness:   return s.NodeBorderThickness;
+        case ImNodalStyleVar_NodeHeaderPadding:     return s.NodeHeaderPadding;
+        case ImNodalStyleVar_NodeBodyPadding:       return s.NodeBodyPadding;
+        case ImNodalStyleVar_NodeColumnSpacing:     return s.NodeColumnSpacing;
+        case ImNodalStyleVar_NodeHoverHandleHeight: return s.NodeHoverHandleHeight;
+        case ImNodalStyleVar_SlotDotRadius:         return s.SlotDotRadius;
+        case ImNodalStyleVar_LinkThickness:         return s.LinkThickness;
+        default: return 0.0f;
+    }
+}
+
+IMNODAL_API ImVec2 GetStyleVarVec2(ImNodalStyleVar aIdx) {
+    Style& s = s_getCtx().style;
+    switch (aIdx) {
+        case ImNodalStyleVar_GridSize:    return s.GridSize;
+        case ImNodalStyleVar_GridSubdivs: return s.GridSubdivs;
+        default: return ImVec2(0.0f, 0.0f);
+    }
+}
+
+IMNODAL_API void PushStyleColor(ImNodalCol aIdx, ImU32 aCol) {
+    if (aIdx < 0 || aIdx >= ImNodalCol_COUNT) return;
+    Context& rCtx = s_getCtx();
+    rCtx.colorStack.push_back({aIdx, rCtx.style.Colors[aIdx]});
+    rCtx.style.Colors[aIdx] = aCol;
+}
+
+IMNODAL_API void PopStyleColor(int aCount) {
+    Context& rCtx = s_getCtx();
+    while (aCount-- > 0 && !rCtx.colorStack.empty()) {
+        const auto& m = rCtx.colorStack.back();
+        rCtx.style.Colors[m.idx] = m.prev;
+        rCtx.colorStack.pop_back();
+    }
+}
+
+namespace {
+// Reads/writes a float style var by index. Returns reference for r/w.
+inline float* s_styleVarFloatPtr(Style& s, ImNodalStyleVar aIdx) {
+    switch (aIdx) {
+        case ImNodalStyleVar_NodeRounding:          return &s.NodeRounding;
+        case ImNodalStyleVar_NodeBorderThickness:   return &s.NodeBorderThickness;
+        case ImNodalStyleVar_NodeHeaderPadding:     return &s.NodeHeaderPadding;
+        case ImNodalStyleVar_NodeBodyPadding:       return &s.NodeBodyPadding;
+        case ImNodalStyleVar_NodeColumnSpacing:     return &s.NodeColumnSpacing;
+        case ImNodalStyleVar_NodeHoverHandleHeight: return &s.NodeHoverHandleHeight;
+        case ImNodalStyleVar_SlotDotRadius:         return &s.SlotDotRadius;
+        case ImNodalStyleVar_LinkThickness:         return &s.LinkThickness;
+        default: return nullptr;
+    }
+}
+inline ImVec2* s_styleVarVec2Ptr(Style& s, ImNodalStyleVar aIdx) {
+    switch (aIdx) {
+        case ImNodalStyleVar_GridSize:    return &s.GridSize;
+        case ImNodalStyleVar_GridSubdivs: return &s.GridSubdivs;
+        default: return nullptr;
+    }
+}
+}  // namespace
+
+IMNODAL_API void PushStyleVar(ImNodalStyleVar aIdx, float aVal) {
+    Context& rCtx = s_getCtx();
+    float* p = s_styleVarFloatPtr(rCtx.style, aIdx);
+    if (p == nullptr) return;
+    VarMod m;
+    m.idx    = aIdx;
+    m.isVec2 = false;
+    m.prevF  = *p;
+    *p = aVal;
+    rCtx.varStack.push_back(m);
+}
+
+IMNODAL_API void PushStyleVar(ImNodalStyleVar aIdx, const ImVec2& aVal) {
+    Context& rCtx = s_getCtx();
+    ImVec2* p = s_styleVarVec2Ptr(rCtx.style, aIdx);
+    if (p == nullptr) return;
+    VarMod m;
+    m.idx    = aIdx;
+    m.isVec2 = true;
+    m.prevV2 = *p;
+    *p = aVal;
+    rCtx.varStack.push_back(m);
+}
+
+IMNODAL_API void PopStyleVar(int aCount) {
+    Context& rCtx = s_getCtx();
+    while (aCount-- > 0 && !rCtx.varStack.empty()) {
+        const auto& m = rCtx.varStack.back();
+        if (m.isVec2) {
+            ImVec2* p = s_styleVarVec2Ptr(rCtx.style, m.idx);
+            if (p) *p = m.prevV2;
+        } else {
+            float* p = s_styleVarFloatPtr(rCtx.style, m.idx);
+            if (p) *p = m.prevF;
+        }
+        rCtx.varStack.pop_back();
+    }
+}
+
+// =====================================================================
+// Style editors
+// =====================================================================
+
+IMNODAL_API const char* GetStyleColorName(ImNodalCol aIdx) {
+    switch (aIdx) {
+        case ImNodalCol_GridLine:              return "GridLine";
+        case ImNodalCol_GridSubLine:           return "GridSubLine";
+        case ImNodalCol_NodeBody:              return "NodeBody";
+        case ImNodalCol_NodeHeader:            return "NodeHeader";
+        case ImNodalCol_NodeBorder:            return "NodeBorder";
+        case ImNodalCol_NodeBorderSelected:    return "NodeBorderSelected";
+        case ImNodalCol_NodeHoverHandle:       return "NodeHoverHandle";
+        case ImNodalCol_SlotDot:               return "SlotDot";
+        case ImNodalCol_SlotDotConnected:      return "SlotDotConnected";
+        case ImNodalCol_SlotDotHovered:        return "SlotDotHovered";
+        case ImNodalCol_SlotHoverFill:         return "SlotHoverFill";
+        case ImNodalCol_SlotHoverBorder:       return "SlotHoverBorder";
+        case ImNodalCol_Link:                  return "Link";
+        case ImNodalCol_LinkHovered:           return "LinkHovered";
+        case ImNodalCol_LinkSelected:          return "LinkSelected";
+        case ImNodalCol_RerouteBorder:         return "RerouteBorder";
+        case ImNodalCol_RerouteBorderSelected: return "RerouteBorderSelected";
+        case ImNodalCol_BoxSelectFill:         return "BoxSelectFill";
+        case ImNodalCol_BoxSelectBorder:       return "BoxSelectBorder";
+        case ImNodalCol_LinkPreviewIdle:       return "LinkPreviewIdle";
+        case ImNodalCol_LinkPreviewAccept:     return "LinkPreviewAccept";
+        case ImNodalCol_LinkPreviewReject:     return "LinkPreviewReject";
+        case ImNodalCol_FlowDot:               return "FlowDot";
+        default:                               return "Unknown";
+    }
+}
+
+IMNODAL_API const char* GetStyleVarName(ImNodalStyleVar aIdx) {
+    switch (aIdx) {
+        case ImNodalStyleVar_NodeRounding:          return "NodeRounding";
+        case ImNodalStyleVar_NodeBorderThickness:   return "NodeBorderThickness";
+        case ImNodalStyleVar_NodeHeaderPadding:     return "NodeHeaderPadding";
+        case ImNodalStyleVar_NodeBodyPadding:       return "NodeBodyPadding";
+        case ImNodalStyleVar_NodeColumnSpacing:     return "NodeColumnSpacing";
+        case ImNodalStyleVar_NodeHoverHandleHeight: return "NodeHoverHandleHeight";
+        case ImNodalStyleVar_SlotDotRadius:         return "SlotDotRadius";
+        case ImNodalStyleVar_LinkThickness:         return "LinkThickness";
+        case ImNodalStyleVar_GridSize:              return "GridSize";
+        case ImNodalStyleVar_GridSubdivs:           return "GridSubdivs";
+        default:                                    return "Unknown";
+    }
+}
+
+IMNODAL_API void ShowStyleColorsEditor() {
+    Style& s = s_getCtx().style;
+    if (ImGui::SmallButton("Reset all colors")) {
+        // Default-construct a fresh Style and copy only the color slots back.
+        const Style def{};
+        for (int i = 0; i < ImNodalCol_COUNT; ++i) s.Colors[i] = def.Colors[i];
+    }
+    ImGui::Separator();
+    ImGui::PushID("ImNodal_StyleColors");
+    for (int i = 0; i < ImNodalCol_COUNT; ++i) {
+        ImVec4 c = ImGui::ColorConvertU32ToFloat4(s.Colors[i]);
+        ImGui::PushID(i);
+        if (ImGui::ColorEdit4(GetStyleColorName(static_cast<ImNodalCol>(i)), &c.x,
+                              ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) {
+            s.Colors[i] = ImGui::ColorConvertFloat4ToU32(c);
+        }
+        ImGui::PopID();
+    }
+    ImGui::PopID();
+}
+
+IMNODAL_API void ShowStyleVarsEditor() {
+    Style& s = s_getCtx().style;
+    if (ImGui::SmallButton("Reset all vars")) {
+        const Style def{};
+        s.NodeRounding          = def.NodeRounding;
+        s.NodeBorderThickness   = def.NodeBorderThickness;
+        s.NodeHeaderPadding     = def.NodeHeaderPadding;
+        s.NodeBodyPadding       = def.NodeBodyPadding;
+        s.NodeColumnSpacing     = def.NodeColumnSpacing;
+        s.NodeHoverHandleHeight = def.NodeHoverHandleHeight;
+        s.SlotDotRadius         = def.SlotDotRadius;
+        s.LinkThickness         = def.LinkThickness;
+        s.GridSize              = def.GridSize;
+        s.GridSubdivs           = def.GridSubdivs;
+    }
+    ImGui::Separator();
+    ImGui::PushID("ImNodal_StyleVars");
+    // Reasonable per-var bounds so DragFloat sliders don't go out of useful range.
+    struct FloatRange { float lo; float hi; float step; };
+    auto floatRange = [](ImNodalStyleVar v) -> FloatRange {
+        switch (v) {
+            case ImNodalStyleVar_NodeRounding:          return {0.0f,  20.0f, 0.1f};
+            case ImNodalStyleVar_NodeBorderThickness:   return {0.0f,   8.0f, 0.1f};
+            case ImNodalStyleVar_NodeHeaderPadding:     return {0.0f,  32.0f, 0.5f};
+            case ImNodalStyleVar_NodeBodyPadding:       return {0.0f,  32.0f, 0.5f};
+            case ImNodalStyleVar_NodeColumnSpacing:     return {0.0f,  64.0f, 0.5f};
+            case ImNodalStyleVar_NodeHoverHandleHeight: return {0.0f,  32.0f, 0.5f};
+            case ImNodalStyleVar_SlotDotRadius:         return {1.0f,  20.0f, 0.1f};
+            case ImNodalStyleVar_LinkThickness:         return {0.5f,  16.0f, 0.1f};
+            default:                                    return {0.0f, 100.0f, 0.5f};
+        }
+    };
+    for (int i = 0; i < ImNodalStyleVar_COUNT; ++i) {
+        const auto v = static_cast<ImNodalStyleVar>(i);
+        const char* name = GetStyleVarName(v);
+        ImGui::PushID(i);
+        if (float* fp = s_styleVarFloatPtr(s, v)) {
+            const FloatRange r = floatRange(v);
+            ImGui::DragFloat(name, fp, r.step, r.lo, r.hi, "%.2f");
+        } else if (ImVec2* vp = s_styleVarVec2Ptr(s, v)) {
+            // Grid metrics are integer-ish; keep step at 1 and clamp to >=1
+            // so the user can't dial them to zero (would divide-by-zero in
+            // grid drawing).
+            ImGui::DragFloat2(name, &vp->x, 1.0f, 1.0f, 1024.0f, "%.0f");
+        }
+        ImGui::PopID();
+    }
+    ImGui::PopID();
+}
+
+// =====================================================================
 // Public API
 // =====================================================================
 
@@ -910,28 +1202,32 @@ IMNODAL_API void DrawCanvasGrid() {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.active && "DrawCanvasGrid outside of Begin/EndCanvas");
 
-    const auto& rCfg     = rCtx.settings;
+    const Style& s       = rCtx.style;
     auto* const pDrawList= rCtx.drawList;
     const ImVec2 offset  = rCtx.origin * rCtx.invScale;
     const ImVec2 winPos  = rCtx.viewRect.Min;
     const ImVec2 size    = rCtx.viewRect.GetSize();
+    const ImU32  majorCol = s.Colors[ImNodalCol_GridLine];
+    const ImU32  minorCol = s.Colors[ImNodalCol_GridSubLine];
+    const ImVec2 gridSize    = s.GridSize;
+    const ImVec2 gridSubdivs = s.GridSubdivs;
 
     // Major lines
-    for (float x = std::fmod(offset.x, rCfg.gridSize.x); x < size.x; x += rCfg.gridSize.x) {
-        pDrawList->AddLine(ImVec2(x, 0.0f) + winPos, ImVec2(x, size.y) + winPos, rCfg.gridColor);
+    for (float x = std::fmod(offset.x, gridSize.x); x < size.x; x += gridSize.x) {
+        pDrawList->AddLine(ImVec2(x, 0.0f) + winPos, ImVec2(x, size.y) + winPos, majorCol);
     }
-    for (float y = std::fmod(offset.y, rCfg.gridSize.y); y < size.y; y += rCfg.gridSize.y) {
-        pDrawList->AddLine(ImVec2(0.0f, y) + winPos, ImVec2(size.x, y) + winPos, rCfg.gridColor);
+    for (float y = std::fmod(offset.y, gridSize.y); y < size.y; y += gridSize.y) {
+        pDrawList->AddLine(ImVec2(0.0f, y) + winPos, ImVec2(size.x, y) + winPos, majorCol);
     }
 
     // Minor subdivisions
-    if (rCfg.gridSubdivs.x != 0.0f && rCfg.gridSubdivs.y != 0.0f) {
-        const ImVec2 sub = rCfg.gridSize / rCfg.gridSubdivs;
+    if (gridSubdivs.x != 0.0f && gridSubdivs.y != 0.0f) {
+        const ImVec2 sub = gridSize / gridSubdivs;
         for (float x = std::fmod(offset.x, sub.x); x < size.x; x += sub.x) {
-            pDrawList->AddLine(ImVec2(x, 0.0f) + winPos, ImVec2(x, size.y) + winPos, rCfg.subGridColor);
+            pDrawList->AddLine(ImVec2(x, 0.0f) + winPos, ImVec2(x, size.y) + winPos, minorCol);
         }
         for (float y = std::fmod(offset.y, sub.y); y < size.y; y += sub.y) {
-            pDrawList->AddLine(ImVec2(0.0f, y) + winPos, ImVec2(size.x, y) + winPos, rCfg.subGridColor);
+            pDrawList->AddLine(ImVec2(0.0f, y) + winPos, ImVec2(size.x, y) + winPos, minorCol);
         }
     }
 }
@@ -1199,8 +1495,8 @@ IMNODAL_API void EndGraph() {
         const ImVec2 mn(ImMin(rCtx.boxSelectStart.x, mouseLocal.x), ImMin(rCtx.boxSelectStart.y, mouseLocal.y));
         const ImVec2 mx(ImMax(rCtx.boxSelectStart.x, mouseLocal.x), ImMax(rCtx.boxSelectStart.y, mouseLocal.y));
         s_setChannel(rCtx, GC_Overlay);
-        rCtx.drawList->AddRectFilled(mn, mx, IM_COL32(120, 200, 255, 40));
-        rCtx.drawList->AddRect(mn, mx, IM_COL32(120, 200, 255, 200));
+        rCtx.drawList->AddRectFilled(mn, mx, rCtx.style.Colors[ImNodalCol_BoxSelectFill]);
+        rCtx.drawList->AddRect(mn, mx, rCtx.style.Colors[ImNodalCol_BoxSelectBorder]);
         s_setChannel(rCtx, GC_Content);
     }
 
@@ -1269,8 +1565,8 @@ IMNODAL_API void EndGraph() {
     if (!rGraph.frameSlotOrder.empty()) {
         pDrawList->ChannelsSetCurrent(GC_Background);
         constexpr float kHoverRounding = 3.0f;
-        const ImU32 kHoverFill   = IM_COL32(255, 255, 255, 32);
-        const ImU32 kHoverBorder = IM_COL32(255, 255, 255, 110);
+        const ImU32 kHoverFill   = rCtx.style.Colors[ImNodalCol_SlotHoverFill];
+        const ImU32 kHoverBorder = rCtx.style.Colors[ImNodalCol_SlotHoverBorder];
         for (Id sid : rGraph.frameSlotOrder) {
             auto it = rCtx.slots.find(sid);
             if (it == rCtx.slots.end()) continue;
@@ -1371,7 +1667,7 @@ IMNODAL_API void EndNode() {
     // Visual rect = content rect expanded by bodyPadding on each side. This
     // is what the user sees as the node's border, so slot dots (which sit
     // at the content-edge) end up `bodyPadding` away from the visible border.
-    const float pad = rNode.settings.bodyPadding;
+    const float pad = rCtx.style.NodeBodyPadding;
     const ImVec2 nodeMin(contentMin.x - pad, contentMin.y - pad);
     const ImVec2 nodeMax(contentMax.x + pad, contentMax.y + pad);
     rNode.size = nodeMax - nodeMin;
@@ -1446,9 +1742,10 @@ IMNODAL_API void EndNode() {
     auto* const pDrawList = rCtx.drawList;
     s_setChannel(rCtx, GC_Background);
 
-    const float rounding = rNode.settings.rounding;
+    const Style& s = rCtx.style;
+    const float rounding = s.NodeRounding;
     // Body fill
-    pDrawList->AddRectFilled(nodeMin, nodeMax, rNode.settings.bodyColor, rounding);
+    pDrawList->AddRectFilled(nodeMin, nodeMax, s.Colors[ImNodalCol_NodeBody], rounding);
     // Header tint (if header was emitted)
     if (rNode.hasHeader) {
         ImRect hdr = rNode.headerScreenRect;
@@ -1457,33 +1754,35 @@ IMNODAL_API void EndNode() {
         hdr.Min.x = nodeMin.x;
         hdr.Min.y = nodeMin.y;
         hdr.Max.x = nodeMax.x;
-        pDrawList->AddRectFilled(hdr.Min, hdr.Max, rNode.settings.headerColor, rounding, ImDrawFlags_RoundCornersTop);
+        pDrawList->AddRectFilled(hdr.Min, hdr.Max, s.Colors[ImNodalCol_NodeHeader], rounding, ImDrawFlags_RoundCornersTop);
     }
     // Border (selected color overrides)
-    const ImU32 borderCol = rNode.selected ? rNode.settings.selectedBorderColor : rNode.settings.borderColor;
+    const ImU32 borderCol = rNode.selected
+        ? s.Colors[rNode.isReroute ? ImNodalCol_RerouteBorderSelected : ImNodalCol_NodeBorderSelected]
+        : s.Colors[rNode.isReroute ? ImNodalCol_RerouteBorder : ImNodalCol_NodeBorder];
     if (rNode.isReroute) {
         // Frame circulaire au centre du dot. Toujours dessinee (alpha de
-        // borderColor par defaut deja faible -> faint frame en permanence ;
-        // selectedBorderColor plus opaque -> highlight a la selection).
+        // RerouteBorder par defaut deja faible -> faint frame en permanence ;
+        // RerouteBorderSelected plus opaque -> highlight a la selection).
         auto sIt = rCtx.slots.find(rNode.rerouteSlotId);
         const ImVec2 center = (sIt != rCtx.slots.end())
             ? sIt->second.screenPos
             : ImVec2((nodeMin.x + nodeMax.x) * 0.5f, (nodeMin.y + nodeMax.y) * 0.5f);
-        const float dotR  = (sIt != rCtx.slots.end()) ? sIt->second.dotRadius : 5.0f;
+        const float dotR  = (sIt != rCtx.slots.end()) ? sIt->second.dotRadius : s.SlotDotRadius;
         const float ringR = dotR + 6.0f;
-        pDrawList->AddCircle(center, ringR, borderCol, 0, rNode.settings.borderThickness);
+        pDrawList->AddCircle(center, ringR, borderCol, 0, s.NodeBorderThickness);
     } else {
-        pDrawList->AddRect(nodeMin, nodeMax, borderCol, rounding, 0, rNode.settings.borderThickness);
+        pDrawList->AddRect(nodeMin, nodeMax, borderCol, rounding, 0, s.NodeBorderThickness);
     }
 
     // Hover-only drag handle bar — shown only when mouse is on the node.
     // Used by reroute-style nodes that have no header: gives the user a visible
     // grab surface to drag the node, appearing only when needed.
     if (rNode.settings.drawHoverHandle && rNode.hovered) {
-        const float h = rNode.settings.hoverHandleHeight;
+        const float h = s.NodeHoverHandleHeight;
         const ImVec2 bMin(nodeMin.x + 2.0f, nodeMin.y + 1.0f);
         const ImVec2 bMax(nodeMax.x - 2.0f, nodeMin.y + 1.0f + h);
-        pDrawList->AddRectFilled(bMin, bMax, rNode.settings.hoverHandleColor, h * 0.5f);
+        pDrawList->AddRectFilled(bMin, bMax, s.Colors[ImNodalCol_NodeHoverHandle], h * 0.5f);
     }
 
     // Restore content channel for next widgets
@@ -1526,7 +1825,7 @@ static bool s_beginBodyColumn(Context& rCtx, Context::Section aSec, const char* 
     IM_ASSERT(rCtx.currentSection == Context::Section_None && "BeginInputs/Outputs/Center while another section is still open");
     NodeState& rNode = rCtx.nodes[rCtx.currentNodeId];
     if (rNode.bodyColumnOpened) {
-        ImGui::SameLine(0.0f, rNode.settings.columnSpacing);
+        ImGui::SameLine(0.0f, rCtx.style.NodeColumnSpacing);
     }
     rCtx.currentSection = aSec;
     ImGui::PushID(aIdLabel);
@@ -1603,7 +1902,7 @@ IMNODAL_API void BeginAlign(float aRatio, float aAvailableWidth) {
         if (rCtx.currentNodeId != 0) {
             auto it = rCtx.nodes.find(rCtx.currentNodeId);
             if (it != rCtx.nodes.end() && it->second.size.x > 0.0f) {
-                availW = it->second.size.x - 2.0f * it->second.settings.bodyPadding;
+                availW = it->second.size.x - 2.0f * rCtx.style.NodeBodyPadding;
                 if (availW < 0.0f) availW = 0.0f;
             }
         }
@@ -1652,10 +1951,12 @@ IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const char* aLabel, const
     rSlot.graphId           = rCtx.currentGraphId;
     rSlot.role              = aRole;
     rSlot.typeTag           = arSettings.typeTag;
-    rSlot.dotRadius         = arSettings.dotRadius;
-    rSlot.dotColor          = arSettings.dotColor;
-    rSlot.dotColorConnected = arSettings.dotColorConnected;
-    rSlot.dotColorHovered   = arSettings.dotColorHovered;
+    // Snapshot du style courant : la dot est dessinee plus tard dans EndGraph,
+    // a un moment ou le user a peut-etre deja fait des Pop. On capture ici.
+    rSlot.dotRadius         = rCtx.style.SlotDotRadius;
+    rSlot.dotColor          = rCtx.style.Colors[ImNodalCol_SlotDot];
+    rSlot.dotColorConnected = rCtx.style.Colors[ImNodalCol_SlotDotConnected];
+    rSlot.dotColorHovered   = rCtx.style.Colors[ImNodalCol_SlotDotHovered];
 
     // EARLY hover hit-test against the previous frame's hit rect. Without this,
     // rSlot.hovered would stay false until EndSlot — but the host typically
@@ -1683,7 +1984,7 @@ IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const char* aLabel, const
     //   Input  → dot first, then label/widget
     //   Output → label/widget first, dot appended in EndSlot
     //   InOut  → label/widget first; dot drawn centered on the group at EndSlot
-    const float padding = arSettings.dotRadius * 2.0f + 4.0f;
+    const float padding = rSlot.dotRadius * 2.0f + 4.0f;
     const bool  isOutput = (aRole == SlotRole_Output);
     const bool  isInOut  = (aRole == SlotRole_InOut);
 
@@ -2050,8 +2351,11 @@ IMNODAL_API void Link(Id aLinkId, Id aFromSlotId, Id aToSlotId, ImU32 aColor, fl
     rLink.fromSlot  = aFromSlotId;
     rLink.toSlot    = aToSlotId;
     rLink.graphId   = rCtx.currentGraphId;
+    // Default thickness from style if caller passed 0.
+    if (aThickness <= 0.0f) aThickness = rCtx.style.LinkThickness;
     rLink.thickness = aThickness;
-    const ImU32 baseColor = (aColor != 0) ? aColor : IM_COL32(220, 220, 220, 230);
+    // Default color from style if caller passed 0.
+    const ImU32 baseColor = (aColor != 0) ? aColor : rCtx.style.Colors[ImNodalCol_Link];
     rLink.color     = baseColor;
 
     rFrom.connected = true;
@@ -2120,9 +2424,9 @@ IMNODAL_API void Link(Id aLinkId, Id aFromSlotId, Id aToSlotId, ImU32 aColor, fl
 
     ImU32 drawColor = baseColor;
     if (rLink.selected) {
-        drawColor = IM_COL32(255, 180, 0, 230);
+        drawColor = rCtx.style.Colors[ImNodalCol_LinkSelected];
     } else if (rLink.hovered) {
-        drawColor = IM_COL32(255, 255, 255, 240);
+        drawColor = rCtx.style.Colors[ImNodalCol_LinkHovered];
     }
 
     // Draw on the Links channel when inside a graph (so it sits above node
@@ -2173,7 +2477,7 @@ IMNODAL_API bool AcceptNewLink(ImU32 aColor) {
     Context& rCtx = s_getCtx();
     if (!s_isDragInCurrentScope(rCtx)) return false;
     rCtx.connAcceptedThisFrame = true;
-    rCtx.connAcceptColor = (aColor != 0) ? aColor : IM_COL32(120, 255, 120, 230);
+    rCtx.connAcceptColor = (aColor != 0) ? aColor : rCtx.style.Colors[ImNodalCol_LinkPreviewAccept];
     rCtx.connRejectReason = nullptr;
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         rCtx.connCommitThisFrame = true;
@@ -2206,7 +2510,7 @@ IMNODAL_API bool AcceptNewNodeFromSlot(ImU32 aColor) {
     if (!s_isDragInCurrentScope(rCtx)) return false;
     if (rCtx.currentHoveredSlot != 0) return false;
     rCtx.connNewNodeAcceptedThisFrame = true;
-    rCtx.connAcceptColor = (aColor != 0) ? aColor : IM_COL32(120, 200, 255, 230);
+    rCtx.connAcceptColor = (aColor != 0) ? aColor : rCtx.style.Colors[ImNodalCol_LinkPreviewAccept];
     rCtx.connRejectReason = nullptr;
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         rCtx.connNewNodeCommitThisFrame = true;
@@ -2271,9 +2575,9 @@ IMNODAL_API void EndConnectionCreate() {
                 if (rCtx.connAcceptedThisFrame || rCtx.connNewNodeAcceptedThisFrame) {
                     color = rCtx.connAcceptColor;
                 } else if (rCtx.connRejectReason != nullptr) {
-                    color = IM_COL32(255, 80, 80, 230);
+                    color = rCtx.style.Colors[ImNodalCol_LinkPreviewReject];
                 } else {
-                    color = IM_COL32(220, 220, 220, 200);
+                    color = rCtx.style.Colors[ImNodalCol_LinkPreviewIdle];
                 }
 
                 if (rCtx.graphActive) {
@@ -2524,6 +2828,24 @@ IMNODAL_API void EndDelete() {
             g.selectionChangedThisFrame = true;
         }
     }
+    // Drop accepted entries from the persistent context maps. Without this, a
+    // deleted node's NodeState lingers in rCtx.nodes — its lastScreenRect is
+    // frozen at the last drawn frame, so NavigateToContent (graph bbox) and
+    // box-select still see the ghost. Same for links/slots.
+    for (Id id : rCtx.acceptedDeleteLinks) {
+        rCtx.links.erase(id);
+    }
+    for (Id id : rCtx.acceptedDeleteNodes) {
+        // Erase all slots whose parent is this node.
+        for (auto it = rCtx.slots.begin(); it != rCtx.slots.end(); ) {
+            if (it->second.parentNode == id) {
+                it = rCtx.slots.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        rCtx.nodes.erase(id);
+    }
     rCtx.pendingDeleteLinks.clear();
     rCtx.pendingDeleteNodes.clear();
     rCtx.acceptedDeleteLinks.clear();
@@ -2656,7 +2978,7 @@ IMNODAL_API void FlowLink(Id aLinkId, float aSpeed, ImU32 aColor) {
     const float phase = std::fmod(t * aSpeed * canvasScale / chordLen, 1.0f);
 
     const ImU32 color = (aColor != 0) ? aColor
-                       : IM_COL32(255, 220, 120, 255);
+                       : rCtx.style.Colors[ImNodalCol_FlowDot];
     const float dotRadius = ImMax(rLink.thickness * 0.9f, 2.0f);
 
     auto* const pDrawList = rCtx.graphActive ? rCtx.drawList : ImGui::GetWindowDrawList();
@@ -2773,8 +3095,19 @@ static bool s_collectNodeBBox(const Context& arCtx, const std::unordered_set<Id>
 }
 
 static bool s_collectAllNodesBBox(const Context& arCtx, ImVec2& aroMin, ImVec2& aroMax) {
+    // Defensive: only count nodes that were drawn last frame. EndDelete now
+    // erases entries on accepted deletion, but a host that wipes its graph
+    // without going through ImNodal's delete path (e.g. clear-then-load) would
+    // otherwise leave ghost NodeStates in the map and pollute the bbox.
+    std::unordered_set<Id> drawnLastFrame;
+    for (const auto& gkv : arCtx.graphs) {
+        for (Id id : gkv.second.frameNodeOrder) {
+            drawnLastFrame.insert(id);
+        }
+    }
     bool any = false;
     for (const auto& kv : arCtx.nodes) {
+        if (!drawnLastFrame.empty() && drawnLastFrame.count(kv.first) == 0) continue;
         const NodeState& n = kv.second;
         if (n.size.x <= 0.0f || n.size.y <= 0.0f) continue;
         const ImVec2 lo = n.pos;
@@ -2833,47 +3166,48 @@ IMNODAL_API void NavigateToSelection(bool aZoomToFit, float aMarginRatio) {
 // clicking on either slot starts a new connection drag.
 
 IMNODAL_API bool BeginRerouteNode(Id aNodeId, Id aSlotId, ImVec2* apPos, const NodeSettings& arSettings, ImU32 aDotColor) {
-    NodeSettings reSettings = arSettings;
-    // Reroute UE-style : un dot bien visible + une frame circulaire LEGEREMENT
-    // transparente en permanence pour materialiser la zone draggable, meme
-    // au repos (sans polluer le rendu — l'alpha est faible). Quand le reroute
-    // est selectionne, la frame passe en jaune semi-opaque (selectedBorderColor).
-    // Le body et le header restent totalement transparents.
-    reSettings.bodyColor           = IM_COL32(0, 0, 0, 0);
-    reSettings.headerColor         = IM_COL32(0, 0, 0, 0);
-    reSettings.borderColor         = IM_COL32(220, 220, 220, 70);   // faint white-ish frame
-    reSettings.selectedBorderColor = IM_COL32(255, 180, 0, 200);    // yellow, slightly transparent
-    reSettings.borderThickness     = 1.5f;
-    reSettings.rounding            = 3.0f;
-    reSettings.drawHoverHandle     = false;
+    // Reroute UE-style : body/header transparents, dot visible, frame
+    // circulaire legerement transparente en permanence (RerouteBorder du
+    // style) qui passe au jaune sur selection (RerouteBorderSelected).
+    // L'override des couleurs node se fait par PushStyleColor, qu'on
+    // matche avec un PopStyleColor a EndRerouteNode.
+    Context& rCtx = s_getCtx();
+    PushStyleColor(ImNodalCol_NodeBody,   IM_COL32(0, 0, 0, 0));
+    PushStyleColor(ImNodalCol_NodeHeader, IM_COL32(0, 0, 0, 0));
+    // Si le host a passe une couleur de wire, on l'utilise pour le dot
+    // (les 3 etats : default, connecte, hovered) — le dot prend visuellement
+    // la couleur du wire qui passe par le reroute.
+    int slotColorPushes = 0;
+    if (aDotColor != 0) {
+        PushStyleColor(ImNodalCol_SlotDot,          aDotColor);
+        PushStyleColor(ImNodalCol_SlotDotConnected, aDotColor);
+        PushStyleColor(ImNodalCol_SlotDotHovered,   IM_COL32(255, 255, 255, 255));
+        slotColorPushes = 3;
+    }
 
+    NodeSettings reSettings = arSettings;
+    reSettings.drawHoverHandle = false;
     if (!BeginNode(aNodeId, apPos, reSettings)) {
+        PopStyleColor(2 + slotColorPushes);
         return false;
     }
 
     // Marque le node comme reroute pour que EndNode dessine la frame de
-    // selection en CERCLE (au lieu du rect par defaut), et pour que le halo
-    // de hover du slot interne soit aussi un cercle dans EndGraph.
+    // selection en CERCLE (au lieu du rect par defaut), pour qu'EndGraph
+    // dessine le halo de hover du slot en cercle, et pour qu'EndNode utilise
+    // ImNodalCol_RerouteBorder/RerouteBorderSelected au lieu des Border
+    // standards.
     {
-        Context& rCtx = s_getCtx();
         auto it = rCtx.nodes.find(aNodeId);
         if (it != rCtx.nodes.end()) {
             it->second.isReroute = true;
             it->second.rerouteSlotId = aSlotId;
         }
     }
+    // On stocke le nombre de push pour les rejouer en pop a EndRerouteNode.
+    rCtx.nodes[aNodeId].rerouteStyleColorPushes = 2 + slotColorPushes;
 
-    // Slot dot color : if the host passed a link-matching color, use it for
-    // the connected/default state so the dot adopts the wire color (UE-like).
     SlotSettings dotSettings{};
-    dotSettings.dotRadius = 5.0f;
-    if (aDotColor != 0) {
-        dotSettings.dotColor          = aDotColor;
-        dotSettings.dotColorConnected = aDotColor;
-        // Hovered : a slight white tint blended with the link color reads as
-        // "highlighted" without losing the link's identity.
-        dotSettings.dotColorHovered   = IM_COL32(255, 255, 255, 255);
-    }
 
     // Leading top spacer so the hover handle has visual room above the dot.
     ImGui::Dummy(ImVec2(18.0f, 4.0f));
@@ -2887,7 +3221,12 @@ IMNODAL_API bool BeginRerouteNode(Id aNodeId, Id aSlotId, ImVec2* apPos, const N
 }
 
 IMNODAL_API void EndRerouteNode() {
+    Context& rCtx = s_getCtx();
+    const int popCount = (rCtx.currentNodeId != 0)
+        ? rCtx.nodes[rCtx.currentNodeId].rerouteStyleColorPushes
+        : 0;
     EndNode();
+    PopStyleColor(popCount);
 }
 
 }  // namespace ImNodal
