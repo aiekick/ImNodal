@@ -99,10 +99,13 @@ enum ImNodalCol_ {
     ImNodalCol_NodeBorder,
     ImNodalCol_NodeBorderSelected,
     ImNodalCol_NodeHoverHandle,
+    // Slot-dot colors are RECOMMENDED defaults that hosts may read when
+    // drawing their own dot. ImNodal itself does NOT render the dot inside
+    // BeginSlot/EndSlot — only the reroute primitive uses these values.
     ImNodalCol_SlotDot,
     ImNodalCol_SlotDotConnected,
     ImNodalCol_SlotDotHovered,
-    ImNodalCol_SlotHoverFill,
+    ImNodalCol_SlotHoverFill,              // interaction halo painted by EndGraph behind the slot rect
     ImNodalCol_SlotHoverBorder,
     ImNodalCol_Link,                       // default link color (when host passes 0)
     ImNodalCol_LinkHovered,
@@ -126,7 +129,8 @@ enum ImNodalStyleVar_ {
     ImNodalStyleVar_NodeBodyPadding,       // float
     ImNodalStyleVar_NodeColumnSpacing,     // float
     ImNodalStyleVar_NodeHoverHandleHeight, // float
-    ImNodalStyleVar_SlotDotRadius,         // float
+    ImNodalStyleVar_SlotDotRadius,         // float — recommended dot radius for hosts; not drawn by ImNodal
+    ImNodalStyleVar_SlotMinSize,           // ImVec2 — Dummy size used when BeginSlot/EndSlot encloses no widget
     ImNodalStyleVar_LinkThickness,         // float (default when Link() gets thickness=0)
     ImNodalStyleVar_GridSize,              // ImVec2
     ImNodalStyleVar_GridSubdivs,           // ImVec2
@@ -143,6 +147,7 @@ struct Style {
     float  NodeColumnSpacing;
     float  NodeHoverHandleHeight;
     float  SlotDotRadius;
+    ImVec2 SlotMinSize;
     float  LinkThickness;
     ImVec2 GridSize;
     ImVec2 GridSubdivs;
@@ -175,6 +180,16 @@ IMNODAL_API const char* GetStyleVarName(ImNodalStyleVar aIdx);
 //   with the same reset button.
 IMNODAL_API void ShowStyleColorsEditor();
 IMNODAL_API void ShowStyleVarsEditor();
+
+// =====================================================================
+// Demo window — auto-contained showcase, ImGui::ShowDemoWindow style
+// =====================================================================
+// Exercises every public feature in a single ImGui window. Pass a bool* if
+// you want a closable window. The demo uses the CURRENT ImNodal context;
+// create one before calling. Internal state (nodes / links / positions) is
+// kept in function-local statics — it survives between frames but is not
+// shared with the caller's graph.
+IMNODAL_API void ShowDemoWindow(bool* apoOpen = nullptr);
 
 // =====================================================================
 // Canvas
@@ -273,12 +288,12 @@ IMNODAL_API void DrawCanvasGrid();
 //             if (BeginNode(nodeId, &pos, nodeSettings)) {
 //                 if (BeginHeader())  { ImGui::Text("Title"); EndHeader(); }
 //                 if (BeginInputs())  {
-//                     if (BeginInputSlot(slotId, "A")) { /* widgets */ EndSlot(); }
+//                     if (BeginInputSlot(slotId)) { ImGui::Text("A"); EndSlot(); }
 //                     EndInputs();
 //                 }
 //                 if (BeginCenter())  { /* body widget */ EndCenter(); }
 //                 if (BeginOutputs()) {
-//                     if (BeginOutputSlot(slotId2, "Out")) { EndSlot(); }
+//                     if (BeginOutputSlot(slotId2)) { ImGui::Text("Out"); EndSlot(); }
 //                     EndOutputs();
 //                 }
 //                 if (BeginFooter()) { /* widgets */ EndFooter(); }
@@ -371,33 +386,57 @@ IMNODAL_API void EndAlign();
 // -----------------------------
 // Slot (primitive — usable anywhere)
 // -----------------------------
-// Dot colors and radius come from the global Style by default. To customize
-// per-slot, push the colors before BeginSlot :
-//     ImNodal::PushStyleColor(ImNodalCol_SlotDot, datas.color);
-//     ImNodal::PushStyleColor(ImNodalCol_SlotDotConnected, datas.connected_color);
-//     ImNodal::BeginInputSlot(id, "label");
-//     ...
-//     ImNodal::EndSlot();
-//     ImNodal::PopStyleColor(2);
+// BeginSlot/EndSlot is a CAPTURE-ONLY scope, in the spirit of
+// thedmd/imgui-node-editor's BeginPin/EndPin. ImNodal does NOT render
+// anything inside it — no dot, no label, no padding. The host emits its
+// own widgets (Text, Icon, Dummy, custom drawing, ...) between Begin and
+// End; ImNodal only :
+//   - opens an ImGui group around the host content,
+//   - computes the link pivot from the resulting group rect,
+//   - hit-tests for hover / click / right-click,
+//   - drives the link-drag state machine.
+//
+// To draw the visible dot (or any other slot mark), call GetSlotScreenPos
+// AFTER EndSlot and paint at that point yourself :
+//
+//     if (ImNodal::BeginInputSlot(slotId)) {
+//         ImGui::Dummy(ImVec2(12, 12));               // reserve room for the mark
+//         ImGui::SameLine(0, 4);
+//         ImGui::TextUnformatted("label");
+//         ImNodal::EndSlot();
+//
+//         // Paint the dot at the link endpoint :
+//         const ImVec2 c = ImNodal::GetSlotScreenPos(slotId);
+//         const ImU32 col = ImNodal::IsSlotHovered(slotId) ? hoverCol
+//                         : ImNodal::IsSlotConnected(slotId) ? connCol
+//                         : restCol;
+//         ImGui::GetWindowDrawList()->AddCircleFilled(c, 5.0f, col);
+//     }
+//
+// Default link-pivot placement (the point where links connect to the slot)
+// is the CENTER of the group rect, regardless of role — same convention
+// as thedmd/imgui-node-editor. The role only drives the link tangent
+// (Input → -X, Output → +X, InOut → auto).
+//
+// If your visible mark sits on an edge of the content (typical : icon at
+// the right of an output, icon at the left of an input), call
+// SlotAlignment(ImVec2(edgeX, 0.5f)) between BeginSlot and EndSlot to
+// pull the pivot to that edge — see "Slot pivot control" below.
+//
+// Empty slot : if the host emits NOTHING between BeginSlot and EndSlot,
+// ImNodal substitutes a Dummy of `Style.SlotMinSize` so the slot still has
+// a hit area. The host can then draw its own mark at GetSlotScreenPos —
+// the "minimal button" pattern.
 struct SlotSettings {
     uint32_t typeTag{0};   // user-chosen type tag (for M2 connection rules)
     SlotSettings() = default;
 };
 
-// Render a slot as an inline button-like widget. The dot position relative
-// to the label/widget depends on the slot role:
-//   - SlotRole_Input  → dot on the left, before the label/widget
-//   - SlotRole_Output → dot on the right, after the label/widget
-//   - SlotRole_InOut  → dot centered on the group rect
-//
-// Dot Y is always centered on the group rect of everything emitted between
-// BeginSlot and EndSlot. BeginInputs / BeginCenter / BeginOutputs are pure
-// 3-column layout helpers and no longer alter the slot's positioning.
-IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const char* aLabel, const SlotSettings& arSettings = {});
+IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const SlotSettings& arSettings = {});
 IMNODAL_API void EndSlot();
 // Convenience wrappers
-IMNODAL_API bool BeginInputSlot (Id aSlotId, const char* aLabel, const SlotSettings& arSettings = {});
-IMNODAL_API bool BeginOutputSlot(Id aSlotId, const char* aLabel, const SlotSettings& arSettings = {});
+IMNODAL_API bool BeginInputSlot (Id aSlotId, const SlotSettings& arSettings = {});
+IMNODAL_API bool BeginOutputSlot(Id aSlotId, const SlotSettings& arSettings = {});
 
 // -----------------------------
 // Graph queries & interactions
@@ -572,28 +611,43 @@ IMNODAL_API ImDrawList* GetNodeForegroundDrawList(Id aNodeId);   // above conten
 IMNODAL_API ImRect      GetNodeRect(Id aNodeId);                 // last-frame screen-space rect
 
 // =====================================================================
-// Slot dot pivot control (override default placement)
+// Slot pivot control — same model as thedmd/imgui-node-editor's
+// PinPivotAlignment / PinPivotSize.
 // =====================================================================
-// Call between BeginSlot and EndSlot to override the dot position. The
-// override applies to the current slot only and resets at EndSlot.
-//   - alignment: position within the slot's group rect (0,0 = top-left,
-//                1,1 = bottom-right). Pass (-1,-1) to use the role default.
-//   - offset:    additional pixel offset added on top of alignment.
-IMNODAL_API void SlotDotPivotAlignment(const ImVec2& aAlignment);
-IMNODAL_API void SlotDotPivotOffset(const ImVec2& aOffsetPx);
-
-// Convenience: anchor the dot to a named edge of the slot group rect.
-// Equivalent to a SlotDotPivotAlignment() call with the matching value.
-enum SlotDotEdge_ {
-    SlotDotEdge_Auto   = 0,  // role default (Input → left, Output → right, InOut → center)
-    SlotDotEdge_Left   = 1,
-    SlotDotEdge_Right  = 2,
-    SlotDotEdge_Top    = 3,
-    SlotDotEdge_Bottom = 4,
-    SlotDotEdge_Center = 5,
-};
-typedef int SlotDotEdge;
-IMNODAL_API void SlotDotAnchorEdge(SlotDotEdge aEdge);
+// The slot pivot is a RECT inside the slot's group rect. The link endpoint
+// snaps to that rect (point-mode when SlotSize is zero). Call between
+// BeginSlot and EndSlot to override per-slot ; the override resets at
+// EndSlot to the defaults below.
+//
+//   - SlotAlignment(a) : 2D alignment of pivot.Min within the group rect.
+//                        (0,0) = group top-left, (1,1) = group bottom-right.
+//                        DEFAULT (0.5, 0.5) — the link endpoint sits at
+//                        the CENTER of whatever the host emitted between
+//                        BeginSlot and EndSlot, regardless of role. The
+//                        role only drives the link tangent.
+//   - SlotSize(s)      : pixel size of the pivot rect (added below/right
+//                        of pivot.Min). DEFAULT (0,0) → pivot is a point.
+//
+// Typical override : a slot whose visible mark is on the right edge of
+// the content (output with icon-after-label) :
+//
+//     if (BeginOutputSlot(id)) {
+//         SlotAlignment(ImVec2(1.0f, 0.5f));   // pivot at right edge
+//         SlotSize(ImVec2(0, 0));              // pivot is a point
+//         ImGui::TextUnformatted("name");
+//         ImGui::SameLine();
+//         ImGui::Dummy(ImVec2(12, 12));        // <- where you'll paint the dot
+//         EndSlot();
+//     }
+//     // then paint the dot at GetSlotScreenPos(id).
+IMNODAL_API void SlotAlignment(const ImVec2& aAlignment);
+IMNODAL_API void SlotSize(const ImVec2& aSizePx);
+// Pixel offset added to the computed screenPos AFTER alignment + size are
+// applied. Handy when you want the link endpoint to land a few pixels off
+// the natural edge — e.g. shift the pivot by `-radius` so a host-painted
+// dot at GetSlotScreenPos sits ENTIRELY inside the group instead of being
+// half-cut by the edge. Resets to (0, 0) at EndSlot like the other two.
+IMNODAL_API void SlotPivotOffset(const ImVec2& aOffsetPx);
 
 // =====================================================================
 // Navigation helpers
@@ -606,18 +660,30 @@ IMNODAL_API void NavigateToSelection(bool aZoomToFit = true, float aMarginRatio 
 // =====================================================================
 // Reroute node (M2)
 // =====================================================================
-// A minimal pass-through node: no header/body/footer, just an input and an
-// output slot at the same point. Used to bend links. Still draggable; clicking
-// + dragging from either slot starts a new connection.
-
-// A reroute has exactly one slot (SlotRole_InOut) that serves as both input
-// and output. The node shows a hover-only drag handle bar (visible only when
-// the mouse is over the node) so you can move it around. Typically paired
-// with double-click-on-link to split a link at a given point.
-// aDotColor: when non-zero, used as the dot's connected color so a reroute on
-// a typed link visually matches the link's color (Unreal-style). When zero,
-// the default greyish dot is kept. The selected/hovered states apply on top.
-IMNODAL_API bool BeginRerouteNode(Id aNodeId, Id aSlotId, ImVec2* apPos, const NodeSettings& arSettings = {}, ImU32 aDotColor = 0);
+// A minimal pass-through node : no header / body / footer, just one InOut
+// slot at the node center. Used to bend links. Still draggable, clicking +
+// dragging from the slot starts a new connection.
+//
+// Like BeginSlot/EndSlot, BeginRerouteNode/EndRerouteNode is CAPTURE-ONLY.
+// ImNodal sets up the node + slot, sizes the hit area to a circle of
+// `aHitRadius` around the slot pivot, and shows a hover-only drag handle.
+// The host renders the visible dot (and any selection ring it wants) AFTER
+// EndRerouteNode using GetSlotScreenPos / IsNodeSelected / IsSlotHovered.
+//
+//     ImNodal::BeginRerouteNode(nodeId, slotId, &pos);
+//     ImNodal::EndRerouteNode();
+//     const ImVec2 c = ImNodal::GetSlotScreenPos(slotId);
+//     auto* dl = ImGui::GetWindowDrawList();
+//     dl->AddCircleFilled(c, 5.0f, dotColor);
+//     if (ImNodal::IsNodeSelected(nodeId))
+//         dl->AddCircle(c, 11.0f, selBorderColor, 0, 1.5f);
+//
+// `aHitRadius` controls the circular hit zone of the reroute slot — keep
+// it close to the radius your host draws so the visible dot and the
+// clickable area match.
+IMNODAL_API bool BeginRerouteNode(Id aNodeId, Id aSlotId, ImVec2* apPos,
+                                  const NodeSettings& arSettings = {},
+                                  float aHitRadius = 5.0f);
 IMNODAL_API void EndRerouteNode();
 
 }  // namespace ImNodal

@@ -14,6 +14,7 @@ find_package(imgui QUIET) # fails quietly if not found (imgui is the target name
 
 add_library(ImNodal
     ImNodal.cpp
+    ImNodalDemo.cpp
     ImNodal.h
     ImNodalConfig.h
 )

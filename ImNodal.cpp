@@ -42,53 +42,51 @@ namespace ImNodal {
 // =====================================================================
 
 struct SlotState {
-    Id        parentNode{0};    // 0 = standalone
-    Id        graphId{0};       // 0 = standalone (outside any BeginGraph)
-    SlotRole  role{SlotRole_Input};
-    uint32_t  typeTag{0};
-    ImVec2    screenPos{};      // dot center, committed at EndSlot
-    ImVec2    tangent{};        // unit vector pointing away from the slot side
-    float     dotRadius{5.0f};  // snapshot of style.SlotDotRadius at BeginSlot
-    // Dot color snapshot taken from the current style at BeginSlot time
-    // (so per-slot PushStyleColor before BeginSlot works as expected).
-    ImU32     dotColor{0};
-    ImU32     dotColorConnected{0};
-    ImU32     dotColorHovered{0};
+    Id parentNode{0};  // 0 = standalone
+    Id graphId{0};     // 0 = standalone (outside any BeginGraph)
+    SlotRole role{SlotRole_Input};
+    uint32_t typeTag{0};
+    // Pivot point at which links anchor on this slot. Computed at EndSlot
+    // from the group rect + role (or pivot override). Hosts that draw their
+    // own dot should draw it at this position so the visible dot matches
+    // the link endpoint.
+    ImVec2 screenPos{};
+    ImVec2 tangent{};       // unit vector pointing away from the slot side
     // Hit rect in local-space, captured at EndSlot. Used by the next frame's
     // BeginSlot to set rSlot.hovered EARLY (so IsSlotHovered() works between
     // BeginSlot and EndSlot — typically where the host queries double-clicks)
-    // and by EndGraph to draw a hover frame around the slot.
-    ImRect    lastHitRect{};
-    bool      hovered{false};
-    bool      ctxMenuRequested{false}; // set by EndSlot when right-clicked
-    bool      connected{false}; // set by M2
+    // and by EndGraph to draw the interaction hover frame around the slot.
+    ImRect lastHitRect{};
+    bool hovered{false};
+    bool ctxMenuRequested{false};  // set by EndSlot when right-clicked
+    bool connected{false};         // set by M2
 };
 
 struct NodeState {
-    ImVec2   pos{};           // canvas-space top-left
-    ImVec2   size{};          // filled at EndNode
-    Id       graphId{0};
-    bool     hovered{false};
-    bool     selected{false};
-    bool     dragging{false};
-    bool     ctxMenuRequested{false};  // right-click on node, set by EndNode
+    ImVec2 pos{};   // canvas-space top-left
+    ImVec2 size{};  // filled at EndNode
+    Id graphId{0};
+    bool hovered{false};
+    bool selected{false};
+    bool dragging{false};
+    bool ctxMenuRequested{false};  // right-click on node, set by EndNode
     // Settings snapshot for EndNode draw
     NodeSettings settings;
     // Header rect (screen), filled at EndHeader, used by EndNode for header tint
-    ImRect   headerScreenRect{};
+    ImRect headerScreenRect{};
     // Last frame's screen-space rect (for GetNodeRect / per-node drawlists)
-    ImRect   lastScreenRect{};
-    bool     hasHeader{false};
+    ImRect lastScreenRect{};
+    bool hasHeader{false};
     // Body column tracking (to emit SameLine between Inputs/Center/Outputs automatically)
-    bool     bodyColumnOpened{false};
+    bool bodyColumnOpened{false};
     // Reroute marker: set by BeginRerouteNode. Switches the selection frame
     // and the slot hover halo from rectangle to CIRCLE — matches UE-style
     // reroutes (a small dot with a ring on hover/select instead of a square).
-    bool     isReroute{false};
-    Id       rerouteSlotId{0};   // valid only when isReroute (used to find dot center)
-    int      rerouteStyleColorPushes{0};  // # PushStyleColor faits par BeginRerouteNode, a Pop a EndRerouteNode
+    bool isReroute{false};
+    Id rerouteSlotId{0};             // valid only when isReroute (used to find dot center)
+    float rerouteHitRadius{0.0f};    // circular hit radius used for the reroute slot (host-supplied)
     // Pointer to user's master copy of pos — updated on drag at EndNode
-    ImVec2*  userPosPtr{nullptr};
+    ImVec2* userPosPtr{nullptr};
 };
 
 // Per-scope persistent state for BeginAlign/EndAlign. The previous frame's
@@ -99,9 +97,9 @@ struct AlignSlot {
 };
 
 struct LinkState {
-    Id    fromSlot{0};
-    Id    toSlot{0};
-    Id    graphId{0};
+    Id fromSlot{0};
+    Id toSlot{0};
+    Id graphId{0};
     ImU32 color{0};
     float thickness{3.0f};
     // Bezier sampled control points cached by Link() for FlowLink() to reuse.
@@ -109,32 +107,32 @@ struct LinkState {
     ImVec2 cachedToPos{};
     ImVec2 cachedP1{};
     ImVec2 cachedP2{};
-    bool   bezierCached{false};
+    bool bezierCached{false};
     // Per-frame interaction state (computed by Link(), reset at NewFrame).
-    bool  hovered{false};
-    bool  clicked{false};
-    bool  doubleClicked{false};
-    bool  selected{false};
-    bool  ctxMenuRequested{false};
+    bool hovered{false};
+    bool clicked{false};
+    bool doubleClicked{false};
+    bool selected{false};
+    bool ctxMenuRequested{false};
 };
 
 struct GraphState {
-    Id       id{0};
+    Id id{0};
     GraphSettings settings{};
     // Splitter channels managed inside BeginGraph/EndGraph
-    bool     splitterActive{false};
-    int      preBeginChannel{0};
+    bool splitterActive{false};
+    int preBeginChannel{0};
     // Multi-selection: a SET of node ids and link ids. Last-clicked id is
     // tracked so the legacy GetSelectedNode/Link can return a stable "first"
     // element (the one the user touched most recently).
     std::unordered_set<Id> selectedNodes;
     std::unordered_set<Id> selectedLinks;
-    Id       lastSelectedNode{0};
-    Id       lastSelectedLink{0};
+    Id lastSelectedNode{0};
+    Id lastSelectedLink{0};
     // Snapshot of the previous frame's selection — used to fire HasSelectionChanged.
     std::unordered_set<Id> prevSelectedNodes;
     std::unordered_set<Id> prevSelectedLinks;
-    bool     selectionChangedThisFrame{false};
+    bool selectionChangedThisFrame{false};
     // Draw order / node Z (M1: simple insertion order)
     std::vector<Id> frameNodeOrder;
     // Slots emitted this frame INSIDE this graph. Their dots are drawn at
@@ -144,7 +142,7 @@ struct GraphState {
     // Set by EndNode or Link() when they consumed the left click this frame.
     // EndGraph reads this to decide whether a left click on empty space should
     // clear selection.
-    bool     clickConsumedThisFrame{false};
+    bool clickConsumedThisFrame{false};
 };
 
 // =====================================================================
@@ -154,21 +152,21 @@ struct GraphState {
 // Style modification stack entries (one per Push call ; popped in reverse).
 struct ColorMod {
     ImNodalCol idx;
-    ImU32      prev;
+    ImU32 prev;
 };
 struct VarMod {
     ImNodalStyleVar idx;
-    bool            isVec2;
-    float           prevF;
-    ImVec2          prevV2;
+    bool isVec2;
+    float prevF;
+    ImVec2 prevV2;
 };
 
 struct Context {
     bool active{false};
 
-    Style style;                          // global appearance state
-    std::vector<ColorMod> colorStack;     // PushStyleColor history
-    std::vector<VarMod>   varStack;       // PushStyleVar history
+    Style style;                       // global appearance state
+    std::vector<ColorMod> colorStack;  // PushStyleColor history
+    std::vector<VarMod> varStack;      // PushStyleVar history
 
     CanvasSettings settings;
 
@@ -178,23 +176,23 @@ struct Context {
     ImRect widgetRect{};
 
     // View: screen = canvas * scale + origin + widgetPos
-    ImVec2 origin{};              // Translation in screen pixels, relative to widgetPos
-    float  scale{1.0f};
-    float  invScale{1.0f};
-    ImVec2 viewTransformPos{};    // origin + widgetPos — recomputed on change
+    ImVec2 origin{};  // Translation in screen pixels, relative to widgetPos
+    float scale{1.0f};
+    float invScale{1.0f};
+    ImVec2 viewTransformPos{};  // origin + widgetPos — recomputed on change
 
     // Visible canvas-space rect (valid while inside local space)
     ImRect viewRect{};
 
     // Draw list state snapshot (for local-space vertex transform)
     ImDrawList* drawList{nullptr};
-    int         expectedChannel{0};
-    int         cmdBufferSize{0};
-    int         startVertexIdx{0};
-    float       lastFringeScale{1.0f};
+    int expectedChannel{0};
+    int cmdBufferSize{0};
+    int startVertexIdx{0};
+    float lastFringeScale{1.0f};
 
     // Pan
-    bool   isPanning{false};
+    bool isPanning{false};
     ImVec2 panStartOrigin{};
 
     // Input backup (for local-space mouse coord transform)
@@ -233,55 +231,59 @@ struct Context {
     std::unordered_map<Id, GraphState> graphs;
 
     // Currently open graph (0 = none)
-    Id       currentGraphId{0};
-    bool     graphActive{false};
+    Id currentGraphId{0};
+    bool graphActive{false};
 
     // Currently open node (0 = none)
-    Id       currentNodeId{0};
+    Id currentNodeId{0};
 
     // Currently open slot (0 = none)
-    Id       currentSlotId{0};
+    Id currentSlotId{0};
+    // Cursor screen pos captured right after BeginSlot's ImGui::BeginGroup.
+    // EndSlot compares against the live cursor to detect "host emitted nothing"
+    // and substitutes a min-size Dummy so the slot still has a hit area.
+    ImVec2 currentSlotBeginCursor{};
 
     // Section tracking (so EndFooter etc. know what to close)
     enum Section { Section_None, Section_Header, Section_Inputs, Section_Center, Section_Outputs, Section_Footer };
-    Section  currentSection{Section_None};
+    Section currentSection{Section_None};
 
     // Active drag target (node being dragged, 0 = none)
-    Id       draggingNodeId{0};
-    ImVec2   dragStartNodePos{};
-    ImVec2   dragStartMouseCanvas{};
+    Id draggingNodeId{0};
+    ImVec2 dragStartNodePos{};
+    ImVec2 dragStartMouseCanvas{};
 
     // -----------------------------
     // Connection creation state machine (M2)
     // -----------------------------
-    Id          draggingFromSlot{0};          // Non-zero → user is dragging a link from this slot
-    Id          currentHoveredSlot{0};        // Slot the mouse is currently on this frame
-    Id          currentHoveredNode{0};        // Node the mouse is currently on this frame
-    Id          currentHoveredLink{0};        // Link the mouse is currently on this frame
-    bool        connAcceptedThisFrame{false}; // AcceptNewLink called this frame
-    bool        connNewNodeAcceptedThisFrame{false}; // AcceptNewNodeFromSlot called this frame
-    ImU32       connAcceptColor{0};           // Color user passed to AcceptNewLink/NewNode
-    const char* connRejectReason{nullptr};    // RejectNewLink reason (pointer assumed stable for the frame)
-    bool        connCommitThisFrame{false};   // Set when mouse released AND accepted this frame
-    bool        connNewNodeCommitThisFrame{false}; // Set when drop-on-empty committed this frame
+    Id draggingFromSlot{0};                    // Non-zero → user is dragging a link from this slot
+    Id currentHoveredSlot{0};                  // Slot the mouse is currently on this frame
+    Id currentHoveredNode{0};                  // Node the mouse is currently on this frame
+    Id currentHoveredLink{0};                  // Link the mouse is currently on this frame
+    bool connAcceptedThisFrame{false};         // AcceptNewLink called this frame
+    bool connNewNodeAcceptedThisFrame{false};  // AcceptNewNodeFromSlot called this frame
+    ImU32 connAcceptColor{0};                  // Color user passed to AcceptNewLink/NewNode
+    const char* connRejectReason{nullptr};     // RejectNewLink reason (pointer assumed stable for the frame)
+    bool connCommitThisFrame{false};           // Set when mouse released AND accepted this frame
+    bool connNewNodeCommitThisFrame{false};    // Set when drop-on-empty committed this frame
 
     // Global "selected link" for standalone (outside-of-graph) link queries.
-    Id          standaloneSelectedLink{0};
+    Id standaloneSelectedLink{0};
 
     // Context-menu requests (right-click on a specific item this frame).
     // Reset every NewFrame; populated by EndNode / EndSlot / Link.
-    Id          ctxMenuNodeId{0};
-    Id          ctxMenuSlotId{0};
-    Id          ctxMenuLinkId{0};
+    Id ctxMenuNodeId{0};
+    Id ctxMenuSlotId{0};
+    Id ctxMenuLinkId{0};
 
     // -----------------------------
     // Delete state machine
     // -----------------------------
-    bool        deleteScopeOpen{false};
+    bool deleteScopeOpen{false};
     std::deque<Id> pendingDeleteLinks;
     std::deque<Id> pendingDeleteNodes;
-    Id          currentDeleteCandidate{0};      // last id returned by QueryDeletedLink/Node
-    int         currentDeleteKind{0};           // 0 = none, 1 = link, 2 = node
+    Id currentDeleteCandidate{0};  // last id returned by QueryDeletedLink/Node
+    int currentDeleteKind{0};      // 0 = none, 1 = link, 2 = node
     // Snapshot of accepted ids in this BeginDelete/EndDelete scope — used to
     // remove them from the selection at EndDelete (so the host doesn't have to).
     std::vector<Id> acceptedDeleteLinks;
@@ -290,22 +292,27 @@ struct Context {
     // -----------------------------
     // Shortcut state machine (Ctrl+C/V/X/D/A)
     // -----------------------------
-    bool        shortcutScopeOpen{false};
-    bool        shortcutCopyFired{false};
-    bool        shortcutPasteFired{false};
-    bool        shortcutCutFired{false};
-    bool        shortcutDuplicateFired{false};
-    bool        shortcutSelectAllFired{false};
+    bool shortcutScopeOpen{false};
+    bool shortcutCopyFired{false};
+    bool shortcutPasteFired{false};
+    bool shortcutCutFired{false};
+    bool shortcutDuplicateFired{false};
+    bool shortcutSelectAllFired{false};
     // Snapshot taken when a shortcut fires — host can read it via
     // GetActionContextNodes/Links the same frame.
     std::vector<Id> actionContextNodes;
     std::vector<Id> actionContextLinks;
 
     // -----------------------------
-    // Slot dot pivot override (current slot only)
+    // Slot pivot override (current slot only) — thedmd-style.
+    // pivot.Min = group.Min + group.Size * slotAlignment
+    // pivot.Max = pivot.Min + slotSize
+    // The link endpoint anchors to the center of the pivot rect (or to
+    // the rect itself when slotSize is non-zero — point in the (0,0) case).
     // -----------------------------
-    ImVec2      slotPivotAlignment{-1.0f, -1.0f};  // <0 = use role default
-    ImVec2      slotPivotOffset{0.0f, 0.0f};
+    ImVec2 slotAlignment{0.5f, 0.5f};   // CENTER of group rect by default
+    ImVec2 slotSize{0.0f, 0.0f};        // zero -> pivot is a point
+    ImVec2 slotPivotOffset{0.0f, 0.0f}; // extra px offset added to screenPos
 
     // -----------------------------
     // BeginAlign / EndAlign layout container
@@ -317,7 +324,7 @@ struct Context {
     std::vector<ImGuiID> alignStack;
     // Per-frame counter for auto-generating unique IDs across multiple
     // BeginAlign calls in the same ImGui scope.
-    int         alignCallCounter{0};
+    int alignCallCounter{0};
 
     // -----------------------------
     // Box-select state (started by left-drag from empty canvas)
@@ -328,16 +335,16 @@ struct Context {
     // bg-click (if not). Coordinates are LOCAL-SPACE (i.e. canvas-space
     // when inside BeginCanvas) — same space used by node lastNodeRect and
     // link cached endpoints.
-    bool        pendingBgClick{false};
-    ImVec2      pendingBgClickPos{};               // local-space (au moment du clic)
-    ImVec2      pendingBgClickPosScreen{};         // screen-space (pour le seuil de drag)
-    bool        boxSelectActive{false};
-    Id          boxSelectGraphId{0};
-    ImVec2      boxSelectStart{};                  // local-space
+    bool pendingBgClick{false};
+    ImVec2 pendingBgClickPos{};        // local-space (au moment du clic)
+    ImVec2 pendingBgClickPosScreen{};  // screen-space (pour le seuil de drag)
+    bool boxSelectActive{false};
+    Id boxSelectGraphId{0};
+    ImVec2 boxSelectStart{};  // local-space
 
     // Set by ImNodal::NewFrame() to ImGui::GetFrameCount() so repeated calls
     // within the same frame are idempotent.
-    int         lastFrameReset{-1};
+    int lastFrameReset{-1};
 };
 
 namespace {
@@ -356,31 +363,33 @@ inline Context& s_getCtx() {
 // same frame are no-ops.
 static void s_doNewFrame(Context& arCtx) {
     const int frame = ImGui::GetFrameCount();
-    if (arCtx.lastFrameReset == frame) return;
+    if (arCtx.lastFrameReset == frame)
+        return;
     arCtx.lastFrameReset = frame;
 
-    arCtx.currentHoveredSlot         = 0;
-    arCtx.currentHoveredNode         = 0;
-    arCtx.currentHoveredLink         = 0;
-    arCtx.connAcceptedThisFrame      = false;
+    arCtx.currentHoveredSlot = 0;
+    arCtx.currentHoveredNode = 0;
+    arCtx.currentHoveredLink = 0;
+    arCtx.connAcceptedThisFrame = false;
     arCtx.connNewNodeAcceptedThisFrame = false;
-    arCtx.connAcceptColor            = 0;
-    arCtx.connRejectReason           = nullptr;
-    arCtx.connCommitThisFrame        = false;
+    arCtx.connAcceptColor = 0;
+    arCtx.connRejectReason = nullptr;
+    arCtx.connCommitThisFrame = false;
     arCtx.connNewNodeCommitThisFrame = false;
 
     arCtx.ctxMenuNodeId = 0;
     arCtx.ctxMenuSlotId = 0;
     arCtx.ctxMenuLinkId = 0;
 
-    arCtx.shortcutCopyFired      = false;
-    arCtx.shortcutPasteFired     = false;
-    arCtx.shortcutCutFired       = false;
+    arCtx.shortcutCopyFired = false;
+    arCtx.shortcutPasteFired = false;
+    arCtx.shortcutCutFired = false;
     arCtx.shortcutDuplicateFired = false;
     arCtx.shortcutSelectAllFired = false;
 
-    arCtx.slotPivotAlignment = ImVec2(-1.0f, -1.0f);
-    arCtx.slotPivotOffset    = ImVec2(0.0f, 0.0f);
+    arCtx.slotAlignment = ImVec2(0.5f, 0.5f);
+    arCtx.slotSize = ImVec2(0.0f, 0.0f);
+    arCtx.slotPivotOffset = ImVec2(0.0f, 0.0f);
 
     arCtx.alignCallCounter = 0;
 
@@ -407,7 +416,7 @@ static void s_doNewFrame(Context& arCtx) {
     // (or their BeginConnectionCreate was skipped for scope reasons). Clear it.
     // We must NOT clear on the release frame itself: EndConnectionCreate needs
     // IsMouseReleased==true this frame to run its commit logic.
-    const bool mouseUp       = !ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    const bool mouseUp = !ImGui::IsMouseDown(ImGuiMouseButton_Left);
     const bool onReleaseFrame = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
     if (arCtx.draggingFromSlot != 0 && mouseUp && !onReleaseFrame) {
         arCtx.draggingFromSlot = 0;
@@ -419,10 +428,12 @@ static void s_doNewFrame(Context& arCtx) {
 // for standalone slots. Used to gate connection-creation queries/commits so
 // a drag started in one scope doesn't fire handlers in another.
 static bool s_isDragInCurrentScope(const Context& arCtx) {
-    if (arCtx.draggingFromSlot == 0) return false;
+    if (arCtx.draggingFromSlot == 0)
+        return false;
     auto it = arCtx.slots.find(arCtx.draggingFromSlot);
-    if (it == arCtx.slots.end()) return false;
-    const Id dragScope    = it->second.graphId;
+    if (it == arCtx.slots.end())
+        return false;
+    const Id dragScope = it->second.graphId;
     const Id currentScope = arCtx.graphActive ? arCtx.currentGraphId : (Id)0;
     return dragScope == currentScope;
 }
@@ -460,7 +471,7 @@ inline void s_updateViewTransformPos(Context& arCtx) {
 
 static void s_saveInputState(Context& arCtx) {
     const auto& rIo = ImGui::GetIO();
-    arCtx.mousePosBackup     = rIo.MousePos;
+    arCtx.mousePosBackup = rIo.MousePos;
     arCtx.mousePosPrevBackup = rIo.MousePosPrev;
     for (int i = 0; i < IM_ARRAYSIZE(arCtx.mouseClickedPosBackup); ++i) {
         arCtx.mouseClickedPosBackup[i] = rIo.MouseClickedPos[i];
@@ -469,7 +480,7 @@ static void s_saveInputState(Context& arCtx) {
 
 static void s_restoreInputState(Context& arCtx) {
     auto& rIo = ImGui::GetIO();
-    rIo.MousePos     = arCtx.mousePosBackup;
+    rIo.MousePos = arCtx.mousePosBackup;
     rIo.MousePosPrev = arCtx.mousePosPrevBackup;
     for (int i = 0; i < IM_ARRAYSIZE(arCtx.mouseClickedPosBackup); ++i) {
         rIo.MouseClickedPos[i] = arCtx.mouseClickedPosBackup[i];
@@ -477,22 +488,22 @@ static void s_restoreInputState(Context& arCtx) {
 }
 
 static void s_saveViewportState(Context& arCtx) {
-    auto* const pWindow   = ImGui::GetCurrentWindow();
+    auto* const pWindow = ImGui::GetCurrentWindow();
     auto* const pViewport = ImGui::GetWindowViewport();
-    arCtx.windowPosBackup        = pWindow->Pos;
-    arCtx.viewportPosBackup      = pViewport->Pos;
-    arCtx.viewportSizeBackup     = pViewport->Size;
-    arCtx.viewportWorkPosBackup  = pViewport->WorkPos;
+    arCtx.windowPosBackup = pWindow->Pos;
+    arCtx.viewportPosBackup = pViewport->Pos;
+    arCtx.viewportSizeBackup = pViewport->Size;
+    arCtx.viewportWorkPosBackup = pViewport->WorkPos;
     arCtx.viewportWorkSizeBackup = pViewport->WorkSize;
 }
 
 static void s_restoreViewportState(Context& arCtx) {
-    auto* const pWindow   = ImGui::GetCurrentWindow();
+    auto* const pWindow = ImGui::GetCurrentWindow();
     auto* const pViewport = ImGui::GetWindowViewport();
-    pWindow->Pos        = arCtx.windowPosBackup;
-    pViewport->Pos      = arCtx.viewportPosBackup;
-    pViewport->Size     = arCtx.viewportSizeBackup;
-    pViewport->WorkPos  = arCtx.viewportWorkPosBackup;
+    pWindow->Pos = arCtx.windowPosBackup;
+    pViewport->Pos = arCtx.viewportPosBackup;
+    pViewport->Size = arCtx.viewportSizeBackup;
+    pViewport->WorkPos = arCtx.viewportWorkPosBackup;
     pViewport->WorkSize = arCtx.viewportWorkSizeBackup;
 }
 
@@ -502,10 +513,10 @@ static void s_enterLocalSpace(Context& arCtx) {
     auto clippedClipRect = arCtx.drawList->_ClipRectStack.back();
     ImGui::PopClipRect();
 
-    arCtx.cmdBufferSize  = ImMax(arCtx.drawList->CmdBuffer.Size - 1, 0);
+    arCtx.cmdBufferSize = ImMax(arCtx.drawList->CmdBuffer.Size - 1, 0);
     arCtx.startVertexIdx = arCtx.drawList->_VtxCurrentIdx + arCtx.drawList->_CmdHeader.VtxOffset;
 
-    auto* const pWindow   = ImGui::GetCurrentWindow();
+    auto* const pWindow = ImGui::GetCurrentWindow();
     auto* const pViewport = ImGui::GetWindowViewport();
     pWindow->Pos = ImVec2(0.0f, 0.0f);
 
@@ -514,9 +525,9 @@ static void s_enterLocalSpace(Context& arCtx) {
     ImVec2 vpMax = arCtx.viewportPosBackup + arCtx.viewportSizeBackup;
     vpMin = (vpMin - arCtx.viewTransformPos) * arCtx.invScale;
     vpMax = (vpMax - arCtx.viewTransformPos) * arCtx.invScale;
-    pViewport->Pos      = vpMin;
-    pViewport->Size     = vpMax - vpMin;
-    pViewport->WorkPos  = arCtx.viewportWorkPosBackup  * arCtx.invScale;
+    pViewport->Pos = vpMin;
+    pViewport->Size = vpMax - vpMin;
+    pViewport->WorkPos = arCtx.viewportWorkPosBackup * arCtx.invScale;
     pViewport->WorkSize = arCtx.viewportWorkSizeBackup * arCtx.invScale;
 
     // Clip rect in local space
@@ -524,13 +535,11 @@ static void s_enterLocalSpace(Context& arCtx) {
     clippedClipRect.y = (clippedClipRect.y - arCtx.viewTransformPos.y) * arCtx.invScale;
     clippedClipRect.z = (clippedClipRect.z - arCtx.viewTransformPos.x) * arCtx.invScale;
     clippedClipRect.w = (clippedClipRect.w - arCtx.viewTransformPos.y) * arCtx.invScale;
-    ImGui::PushClipRect(ImVec2(clippedClipRect.x, clippedClipRect.y),
-                        ImVec2(clippedClipRect.z, clippedClipRect.w),
-                        false);
+    ImGui::PushClipRect(ImVec2(clippedClipRect.x, clippedClipRect.y), ImVec2(clippedClipRect.z, clippedClipRect.w), false);
 
     // Mouse in local space
     auto& rIo = ImGui::GetIO();
-    rIo.MousePos     = (arCtx.mousePosBackup     - arCtx.viewTransformPos) * arCtx.invScale;
+    rIo.MousePos = (arCtx.mousePosBackup - arCtx.viewTransformPos) * arCtx.invScale;
     rIo.MousePosPrev = (arCtx.mousePosPrevBackup - arCtx.viewTransformPos) * arCtx.invScale;
     for (int i = 0; i < IM_ARRAYSIZE(arCtx.mouseClickedPosBackup); ++i) {
         rIo.MouseClickedPos[i] = (arCtx.mouseClickedPosBackup[i] - arCtx.viewTransformPos) * arCtx.invScale;
@@ -547,7 +556,7 @@ static void s_leaveLocalSpace(Context& arCtx) {
     IM_ASSERT(arCtx.drawList->_Splitter._Current == arCtx.expectedChannel && "Unbalanced channel splitter on leave local space");
 
     // Bake new vertices: canvas-space -> screen-space
-    auto* pVtx    = arCtx.drawList->VtxBuffer.Data + arCtx.startVertexIdx;
+    auto* pVtx = arCtx.drawList->VtxBuffer.Data + arCtx.startVertexIdx;
     auto* pVtxEnd = arCtx.drawList->VtxBuffer.Data + arCtx.drawList->_VtxCurrentIdx + arCtx.drawList->_CmdHeader.VtxOffset;
 
     if (arCtx.scale != 1.0f) {
@@ -618,10 +627,7 @@ static void s_manageZoom(Context& arCtx) {
         return;
     }
 
-    const float newScale = ImClamp(
-        arCtx.scale + wheel * arCtx.settings.zoomStep,
-        arCtx.settings.zoomMin,
-        arCtx.settings.zoomMax);
+    const float newScale = ImClamp(arCtx.scale + wheel * arCtx.settings.zoomStep, arCtx.settings.zoomMin, arCtx.settings.zoomMax);
     if (newScale == arCtx.scale) {
         return;
     }
@@ -629,7 +635,7 @@ static void s_manageZoom(Context& arCtx) {
     // Zoom anchored on cursor: same canvas point stays under mouse before/after.
     // mousePosBackup is cursor in screen space (saved before entering local space).
     const ImVec2 mouseCanvas = (arCtx.mousePosBackup - arCtx.viewTransformPos) * arCtx.invScale;
-    const ImVec2 newOrigin   = arCtx.mousePosBackup - arCtx.widgetPos - mouseCanvas * newScale;
+    const ImVec2 newOrigin = arCtx.mousePosBackup - arCtx.widgetPos - mouseCanvas * newScale;
     SetCanvasView(newOrigin, newScale);
 }
 
@@ -658,75 +664,82 @@ Style::Style() {
     // Defaults : sane dark-theme values matching what the lib used hardcoded
     // before the style refactor. Tweak at runtime via GetStyle() or via the
     // Push/Pop helpers.
-    Colors[ImNodalCol_GridLine]                = IM_COL32(200, 200, 200, 40);
-    Colors[ImNodalCol_GridSubLine]             = IM_COL32(200, 200, 200, 10);
-    Colors[ImNodalCol_NodeBody]                = IM_COL32( 50,  50,  50, 230);
-    Colors[ImNodalCol_NodeHeader]              = IM_COL32( 60, 120, 180, 255);
-    Colors[ImNodalCol_NodeBorder]              = IM_COL32( 80,  80,  80, 255);
-    Colors[ImNodalCol_NodeBorderSelected]      = IM_COL32(255, 180,   0, 255);
-    Colors[ImNodalCol_NodeHoverHandle]         = IM_COL32(255, 255, 255, 120);
-    Colors[ImNodalCol_SlotDot]                 = IM_COL32(200, 200, 200, 255);
-    Colors[ImNodalCol_SlotDotConnected]        = IM_COL32(255, 220,   0, 255);
-    Colors[ImNodalCol_SlotDotHovered]          = IM_COL32(255, 255, 255, 255);
-    Colors[ImNodalCol_SlotHoverFill]           = IM_COL32(255, 255, 255,  32);
-    Colors[ImNodalCol_SlotHoverBorder]         = IM_COL32(255, 255, 255, 110);
-    Colors[ImNodalCol_Link]                    = IM_COL32(220, 220, 220, 230);
-    Colors[ImNodalCol_LinkHovered]             = IM_COL32(255, 255, 255, 240);
-    Colors[ImNodalCol_LinkSelected]            = IM_COL32(255, 180,   0, 230);
-    Colors[ImNodalCol_RerouteBorder]           = IM_COL32(220, 220, 220,  70);
-    Colors[ImNodalCol_RerouteBorderSelected]   = IM_COL32(255, 180,   0, 200);
-    Colors[ImNodalCol_BoxSelectFill]           = IM_COL32(120, 200, 255,  40);
-    Colors[ImNodalCol_BoxSelectBorder]         = IM_COL32(120, 200, 255, 200);
-    Colors[ImNodalCol_LinkPreviewIdle]         = IM_COL32(220, 220, 220, 200);
-    Colors[ImNodalCol_LinkPreviewAccept]       = IM_COL32(120, 255, 120, 230);
-    Colors[ImNodalCol_LinkPreviewReject]       = IM_COL32(255,  80,  80, 230);
-    Colors[ImNodalCol_FlowDot]                 = IM_COL32(255, 220, 120, 255);
+    Colors[ImNodalCol_GridLine] = IM_COL32(200, 200, 200, 40);
+    Colors[ImNodalCol_GridSubLine] = IM_COL32(200, 200, 200, 10);
+    Colors[ImNodalCol_NodeBody] = IM_COL32(50, 50, 50, 230);
+    Colors[ImNodalCol_NodeHeader] = IM_COL32(60, 120, 180, 255);
+    Colors[ImNodalCol_NodeBorder] = IM_COL32(80, 80, 80, 255);
+    Colors[ImNodalCol_NodeBorderSelected] = IM_COL32(255, 180, 0, 255);
+    Colors[ImNodalCol_NodeHoverHandle] = IM_COL32(255, 255, 255, 120);
+    Colors[ImNodalCol_SlotDot] = IM_COL32(200, 200, 200, 255);
+    Colors[ImNodalCol_SlotDotConnected] = IM_COL32(255, 220, 0, 255);
+    Colors[ImNodalCol_SlotDotHovered] = IM_COL32(255, 255, 255, 255);
+    Colors[ImNodalCol_SlotHoverFill] = IM_COL32(255, 255, 255, 32);
+    Colors[ImNodalCol_SlotHoverBorder] = IM_COL32(255, 255, 255, 110);
+    Colors[ImNodalCol_Link] = IM_COL32(220, 220, 220, 230);
+    Colors[ImNodalCol_LinkHovered] = IM_COL32(255, 255, 255, 240);
+    Colors[ImNodalCol_LinkSelected] = IM_COL32(255, 180, 0, 230);
+    Colors[ImNodalCol_RerouteBorder] = IM_COL32(220, 220, 220, 70);
+    Colors[ImNodalCol_RerouteBorderSelected] = IM_COL32(255, 180, 0, 200);
+    Colors[ImNodalCol_BoxSelectFill] = IM_COL32(120, 200, 255, 40);
+    Colors[ImNodalCol_BoxSelectBorder] = IM_COL32(120, 200, 255, 200);
+    Colors[ImNodalCol_LinkPreviewIdle] = IM_COL32(220, 220, 220, 200);
+    Colors[ImNodalCol_LinkPreviewAccept] = IM_COL32(120, 255, 120, 230);
+    Colors[ImNodalCol_LinkPreviewReject] = IM_COL32(255, 80, 80, 230);
+    Colors[ImNodalCol_FlowDot] = IM_COL32(255, 220, 120, 255);
 
-    NodeRounding          = 4.0f;
-    NodeBorderThickness   = 1.5f;
-    NodeHeaderPadding     = 6.0f;
-    NodeBodyPadding       = 6.0f;
-    NodeColumnSpacing     = 10.0f;
+    NodeRounding = 4.0f;
+    NodeBorderThickness = 1.5f;
+    NodeHeaderPadding = 6.0f;
+    NodeBodyPadding = 6.0f;
+    NodeColumnSpacing = 10.0f;
     NodeHoverHandleHeight = 4.0f;
-    SlotDotRadius         = 5.0f;
-    LinkThickness         = 3.0f;
-    GridSize              = ImVec2(50.0f, 50.0f);
-    GridSubdivs           = ImVec2( 5.0f,  5.0f);
+    SlotDotRadius = 5.0f;
+    SlotMinSize = ImVec2(12.0f, 12.0f);
+    LinkThickness = 3.0f;
+    GridSize = ImVec2(50.0f, 50.0f);
+    GridSubdivs = ImVec2(5.0f, 5.0f);
 }
 
-IMNODAL_API Style& GetStyle() { return s_getCtx().style; }
+IMNODAL_API Style& GetStyle() {
+    return s_getCtx().style;
+}
 
 IMNODAL_API ImU32 GetStyleColorU32(ImNodalCol aIdx) {
-    if (aIdx < 0 || aIdx >= ImNodalCol_COUNT) return 0;
+    if (aIdx < 0 || aIdx >= ImNodalCol_COUNT)
+        return 0;
     return s_getCtx().style.Colors[aIdx];
 }
 
 IMNODAL_API float GetStyleVarFloat(ImNodalStyleVar aIdx) {
     Style& s = s_getCtx().style;
     switch (aIdx) {
-        case ImNodalStyleVar_NodeRounding:          return s.NodeRounding;
-        case ImNodalStyleVar_NodeBorderThickness:   return s.NodeBorderThickness;
-        case ImNodalStyleVar_NodeHeaderPadding:     return s.NodeHeaderPadding;
-        case ImNodalStyleVar_NodeBodyPadding:       return s.NodeBodyPadding;
-        case ImNodalStyleVar_NodeColumnSpacing:     return s.NodeColumnSpacing;
+        case ImNodalStyleVar_NodeRounding: return s.NodeRounding;
+        case ImNodalStyleVar_NodeBorderThickness: return s.NodeBorderThickness;
+        case ImNodalStyleVar_NodeHeaderPadding: return s.NodeHeaderPadding;
+        case ImNodalStyleVar_NodeBodyPadding: return s.NodeBodyPadding;
+        case ImNodalStyleVar_NodeColumnSpacing: return s.NodeColumnSpacing;
         case ImNodalStyleVar_NodeHoverHandleHeight: return s.NodeHoverHandleHeight;
-        case ImNodalStyleVar_SlotDotRadius:         return s.SlotDotRadius;
-        case ImNodalStyleVar_LinkThickness:         return s.LinkThickness;
+        case ImNodalStyleVar_SlotDotRadius: return s.SlotDotRadius;
+        case ImNodalStyleVar_LinkThickness: return s.LinkThickness;
         default: return 0.0f;
     }
+    return 0.0f;
 }
 
 IMNODAL_API ImVec2 GetStyleVarVec2(ImNodalStyleVar aIdx) {
     Style& s = s_getCtx().style;
     switch (aIdx) {
-        case ImNodalStyleVar_GridSize:    return s.GridSize;
+        case ImNodalStyleVar_GridSize: return s.GridSize;
         case ImNodalStyleVar_GridSubdivs: return s.GridSubdivs;
+        case ImNodalStyleVar_SlotMinSize: return s.SlotMinSize;
         default: return ImVec2(0.0f, 0.0f);
     }
 }
 
 IMNODAL_API void PushStyleColor(ImNodalCol aIdx, ImU32 aCol) {
-    if (aIdx < 0 || aIdx >= ImNodalCol_COUNT) return;
+    if (aIdx < 0 || aIdx >= ImNodalCol_COUNT)
+        return;
     Context& rCtx = s_getCtx();
     rCtx.colorStack.push_back({aIdx, rCtx.style.Colors[aIdx]});
     rCtx.style.Colors[aIdx] = aCol;
@@ -745,21 +758,22 @@ namespace {
 // Reads/writes a float style var by index. Returns reference for r/w.
 inline float* s_styleVarFloatPtr(Style& s, ImNodalStyleVar aIdx) {
     switch (aIdx) {
-        case ImNodalStyleVar_NodeRounding:          return &s.NodeRounding;
-        case ImNodalStyleVar_NodeBorderThickness:   return &s.NodeBorderThickness;
-        case ImNodalStyleVar_NodeHeaderPadding:     return &s.NodeHeaderPadding;
-        case ImNodalStyleVar_NodeBodyPadding:       return &s.NodeBodyPadding;
-        case ImNodalStyleVar_NodeColumnSpacing:     return &s.NodeColumnSpacing;
+        case ImNodalStyleVar_NodeRounding: return &s.NodeRounding;
+        case ImNodalStyleVar_NodeBorderThickness: return &s.NodeBorderThickness;
+        case ImNodalStyleVar_NodeHeaderPadding: return &s.NodeHeaderPadding;
+        case ImNodalStyleVar_NodeBodyPadding: return &s.NodeBodyPadding;
+        case ImNodalStyleVar_NodeColumnSpacing: return &s.NodeColumnSpacing;
         case ImNodalStyleVar_NodeHoverHandleHeight: return &s.NodeHoverHandleHeight;
-        case ImNodalStyleVar_SlotDotRadius:         return &s.SlotDotRadius;
-        case ImNodalStyleVar_LinkThickness:         return &s.LinkThickness;
+        case ImNodalStyleVar_SlotDotRadius: return &s.SlotDotRadius;
+        case ImNodalStyleVar_LinkThickness: return &s.LinkThickness;
         default: return nullptr;
     }
 }
 inline ImVec2* s_styleVarVec2Ptr(Style& s, ImNodalStyleVar aIdx) {
     switch (aIdx) {
-        case ImNodalStyleVar_GridSize:    return &s.GridSize;
+        case ImNodalStyleVar_GridSize: return &s.GridSize;
         case ImNodalStyleVar_GridSubdivs: return &s.GridSubdivs;
+        case ImNodalStyleVar_SlotMinSize: return &s.SlotMinSize;
         default: return nullptr;
     }
 }
@@ -768,11 +782,12 @@ inline ImVec2* s_styleVarVec2Ptr(Style& s, ImNodalStyleVar aIdx) {
 IMNODAL_API void PushStyleVar(ImNodalStyleVar aIdx, float aVal) {
     Context& rCtx = s_getCtx();
     float* p = s_styleVarFloatPtr(rCtx.style, aIdx);
-    if (p == nullptr) return;
+    if (p == nullptr)
+        return;
     VarMod m;
-    m.idx    = aIdx;
+    m.idx = aIdx;
     m.isVec2 = false;
-    m.prevF  = *p;
+    m.prevF = *p;
     *p = aVal;
     rCtx.varStack.push_back(m);
 }
@@ -780,9 +795,10 @@ IMNODAL_API void PushStyleVar(ImNodalStyleVar aIdx, float aVal) {
 IMNODAL_API void PushStyleVar(ImNodalStyleVar aIdx, const ImVec2& aVal) {
     Context& rCtx = s_getCtx();
     ImVec2* p = s_styleVarVec2Ptr(rCtx.style, aIdx);
-    if (p == nullptr) return;
+    if (p == nullptr)
+        return;
     VarMod m;
-    m.idx    = aIdx;
+    m.idx = aIdx;
     m.isVec2 = true;
     m.prevV2 = *p;
     *p = aVal;
@@ -795,10 +811,12 @@ IMNODAL_API void PopStyleVar(int aCount) {
         const auto& m = rCtx.varStack.back();
         if (m.isVec2) {
             ImVec2* p = s_styleVarVec2Ptr(rCtx.style, m.idx);
-            if (p) *p = m.prevV2;
+            if (p)
+                *p = m.prevV2;
         } else {
             float* p = s_styleVarFloatPtr(rCtx.style, m.idx);
-            if (p) *p = m.prevF;
+            if (p)
+                *p = m.prevF;
         }
         rCtx.varStack.pop_back();
     }
@@ -810,46 +828,47 @@ IMNODAL_API void PopStyleVar(int aCount) {
 
 IMNODAL_API const char* GetStyleColorName(ImNodalCol aIdx) {
     switch (aIdx) {
-        case ImNodalCol_GridLine:              return "GridLine";
-        case ImNodalCol_GridSubLine:           return "GridSubLine";
-        case ImNodalCol_NodeBody:              return "NodeBody";
-        case ImNodalCol_NodeHeader:            return "NodeHeader";
-        case ImNodalCol_NodeBorder:            return "NodeBorder";
-        case ImNodalCol_NodeBorderSelected:    return "NodeBorderSelected";
-        case ImNodalCol_NodeHoverHandle:       return "NodeHoverHandle";
-        case ImNodalCol_SlotDot:               return "SlotDot";
-        case ImNodalCol_SlotDotConnected:      return "SlotDotConnected";
-        case ImNodalCol_SlotDotHovered:        return "SlotDotHovered";
-        case ImNodalCol_SlotHoverFill:         return "SlotHoverFill";
-        case ImNodalCol_SlotHoverBorder:       return "SlotHoverBorder";
-        case ImNodalCol_Link:                  return "Link";
-        case ImNodalCol_LinkHovered:           return "LinkHovered";
-        case ImNodalCol_LinkSelected:          return "LinkSelected";
-        case ImNodalCol_RerouteBorder:         return "RerouteBorder";
+        case ImNodalCol_GridLine: return "GridLine";
+        case ImNodalCol_GridSubLine: return "GridSubLine";
+        case ImNodalCol_NodeBody: return "NodeBody";
+        case ImNodalCol_NodeHeader: return "NodeHeader";
+        case ImNodalCol_NodeBorder: return "NodeBorder";
+        case ImNodalCol_NodeBorderSelected: return "NodeBorderSelected";
+        case ImNodalCol_NodeHoverHandle: return "NodeHoverHandle";
+        case ImNodalCol_SlotDot: return "SlotDot";
+        case ImNodalCol_SlotDotConnected: return "SlotDotConnected";
+        case ImNodalCol_SlotDotHovered: return "SlotDotHovered";
+        case ImNodalCol_SlotHoverFill: return "SlotHoverFill";
+        case ImNodalCol_SlotHoverBorder: return "SlotHoverBorder";
+        case ImNodalCol_Link: return "Link";
+        case ImNodalCol_LinkHovered: return "LinkHovered";
+        case ImNodalCol_LinkSelected: return "LinkSelected";
+        case ImNodalCol_RerouteBorder: return "RerouteBorder";
         case ImNodalCol_RerouteBorderSelected: return "RerouteBorderSelected";
-        case ImNodalCol_BoxSelectFill:         return "BoxSelectFill";
-        case ImNodalCol_BoxSelectBorder:       return "BoxSelectBorder";
-        case ImNodalCol_LinkPreviewIdle:       return "LinkPreviewIdle";
-        case ImNodalCol_LinkPreviewAccept:     return "LinkPreviewAccept";
-        case ImNodalCol_LinkPreviewReject:     return "LinkPreviewReject";
-        case ImNodalCol_FlowDot:               return "FlowDot";
-        default:                               return "Unknown";
+        case ImNodalCol_BoxSelectFill: return "BoxSelectFill";
+        case ImNodalCol_BoxSelectBorder: return "BoxSelectBorder";
+        case ImNodalCol_LinkPreviewIdle: return "LinkPreviewIdle";
+        case ImNodalCol_LinkPreviewAccept: return "LinkPreviewAccept";
+        case ImNodalCol_LinkPreviewReject: return "LinkPreviewReject";
+        case ImNodalCol_FlowDot: return "FlowDot";
+        default: return "Unknown";
     }
 }
 
 IMNODAL_API const char* GetStyleVarName(ImNodalStyleVar aIdx) {
     switch (aIdx) {
-        case ImNodalStyleVar_NodeRounding:          return "NodeRounding";
-        case ImNodalStyleVar_NodeBorderThickness:   return "NodeBorderThickness";
-        case ImNodalStyleVar_NodeHeaderPadding:     return "NodeHeaderPadding";
-        case ImNodalStyleVar_NodeBodyPadding:       return "NodeBodyPadding";
-        case ImNodalStyleVar_NodeColumnSpacing:     return "NodeColumnSpacing";
+        case ImNodalStyleVar_NodeRounding: return "NodeRounding";
+        case ImNodalStyleVar_NodeBorderThickness: return "NodeBorderThickness";
+        case ImNodalStyleVar_NodeHeaderPadding: return "NodeHeaderPadding";
+        case ImNodalStyleVar_NodeBodyPadding: return "NodeBodyPadding";
+        case ImNodalStyleVar_NodeColumnSpacing: return "NodeColumnSpacing";
         case ImNodalStyleVar_NodeHoverHandleHeight: return "NodeHoverHandleHeight";
-        case ImNodalStyleVar_SlotDotRadius:         return "SlotDotRadius";
-        case ImNodalStyleVar_LinkThickness:         return "LinkThickness";
-        case ImNodalStyleVar_GridSize:              return "GridSize";
-        case ImNodalStyleVar_GridSubdivs:           return "GridSubdivs";
-        default:                                    return "Unknown";
+        case ImNodalStyleVar_SlotDotRadius: return "SlotDotRadius";
+        case ImNodalStyleVar_SlotMinSize: return "SlotMinSize";
+        case ImNodalStyleVar_LinkThickness: return "LinkThickness";
+        case ImNodalStyleVar_GridSize: return "GridSize";
+        case ImNodalStyleVar_GridSubdivs: return "GridSubdivs";
+        default: return "Unknown";
     }
 }
 
@@ -858,15 +877,16 @@ IMNODAL_API void ShowStyleColorsEditor() {
     if (ImGui::SmallButton("Reset all colors")) {
         // Default-construct a fresh Style and copy only the color slots back.
         const Style def{};
-        for (int i = 0; i < ImNodalCol_COUNT; ++i) s.Colors[i] = def.Colors[i];
+        for (int i = 0; i < ImNodalCol_COUNT; ++i)
+            s.Colors[i] = def.Colors[i];
     }
     ImGui::Separator();
     ImGui::PushID("ImNodal_StyleColors");
     for (int i = 0; i < ImNodalCol_COUNT; ++i) {
         ImVec4 c = ImGui::ColorConvertU32ToFloat4(s.Colors[i]);
         ImGui::PushID(i);
-        if (ImGui::ColorEdit4(GetStyleColorName(static_cast<ImNodalCol>(i)), &c.x,
-                              ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) {
+        if (ImGui::ColorEdit4(
+                GetStyleColorName(static_cast<ImNodalCol>(i)), &c.x, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf)) {
             s.Colors[i] = ImGui::ColorConvertFloat4ToU32(c);
         }
         ImGui::PopID();
@@ -878,32 +898,37 @@ IMNODAL_API void ShowStyleVarsEditor() {
     Style& s = s_getCtx().style;
     if (ImGui::SmallButton("Reset all vars")) {
         const Style def{};
-        s.NodeRounding          = def.NodeRounding;
-        s.NodeBorderThickness   = def.NodeBorderThickness;
-        s.NodeHeaderPadding     = def.NodeHeaderPadding;
-        s.NodeBodyPadding       = def.NodeBodyPadding;
-        s.NodeColumnSpacing     = def.NodeColumnSpacing;
+        s.NodeRounding = def.NodeRounding;
+        s.NodeBorderThickness = def.NodeBorderThickness;
+        s.NodeHeaderPadding = def.NodeHeaderPadding;
+        s.NodeBodyPadding = def.NodeBodyPadding;
+        s.NodeColumnSpacing = def.NodeColumnSpacing;
         s.NodeHoverHandleHeight = def.NodeHoverHandleHeight;
-        s.SlotDotRadius         = def.SlotDotRadius;
-        s.LinkThickness         = def.LinkThickness;
-        s.GridSize              = def.GridSize;
-        s.GridSubdivs           = def.GridSubdivs;
+        s.SlotDotRadius = def.SlotDotRadius;
+        s.SlotMinSize = def.SlotMinSize;
+        s.LinkThickness = def.LinkThickness;
+        s.GridSize = def.GridSize;
+        s.GridSubdivs = def.GridSubdivs;
     }
     ImGui::Separator();
     ImGui::PushID("ImNodal_StyleVars");
     // Reasonable per-var bounds so DragFloat sliders don't go out of useful range.
-    struct FloatRange { float lo; float hi; float step; };
+    struct FloatRange {
+        float lo;
+        float hi;
+        float step;
+    };
     auto floatRange = [](ImNodalStyleVar v) -> FloatRange {
         switch (v) {
-            case ImNodalStyleVar_NodeRounding:          return {0.0f,  20.0f, 0.1f};
-            case ImNodalStyleVar_NodeBorderThickness:   return {0.0f,   8.0f, 0.1f};
-            case ImNodalStyleVar_NodeHeaderPadding:     return {0.0f,  32.0f, 0.5f};
-            case ImNodalStyleVar_NodeBodyPadding:       return {0.0f,  32.0f, 0.5f};
-            case ImNodalStyleVar_NodeColumnSpacing:     return {0.0f,  64.0f, 0.5f};
-            case ImNodalStyleVar_NodeHoverHandleHeight: return {0.0f,  32.0f, 0.5f};
-            case ImNodalStyleVar_SlotDotRadius:         return {1.0f,  20.0f, 0.1f};
-            case ImNodalStyleVar_LinkThickness:         return {0.5f,  16.0f, 0.1f};
-            default:                                    return {0.0f, 100.0f, 0.5f};
+            case ImNodalStyleVar_NodeRounding: return {0.0f, 20.0f, 0.1f};
+            case ImNodalStyleVar_NodeBorderThickness: return {0.0f, 8.0f, 0.1f};
+            case ImNodalStyleVar_NodeHeaderPadding: return {0.0f, 32.0f, 0.5f};
+            case ImNodalStyleVar_NodeBodyPadding: return {0.0f, 32.0f, 0.5f};
+            case ImNodalStyleVar_NodeColumnSpacing: return {0.0f, 64.0f, 0.5f};
+            case ImNodalStyleVar_NodeHoverHandleHeight: return {0.0f, 32.0f, 0.5f};
+            case ImNodalStyleVar_SlotDotRadius: return {1.0f, 20.0f, 0.1f};
+            case ImNodalStyleVar_LinkThickness: return {0.5f, 16.0f, 0.1f};
+            default: return {0.0f, 100.0f, 0.5f};
         }
     };
     for (int i = 0; i < ImNodalStyleVar_COUNT; ++i) {
@@ -914,10 +939,15 @@ IMNODAL_API void ShowStyleVarsEditor() {
             const FloatRange r = floatRange(v);
             ImGui::DragFloat(name, fp, r.step, r.lo, r.hi, "%.2f");
         } else if (ImVec2* vp = s_styleVarVec2Ptr(s, v)) {
-            // Grid metrics are integer-ish; keep step at 1 and clamp to >=1
-            // so the user can't dial them to zero (would divide-by-zero in
-            // grid drawing).
-            ImGui::DragFloat2(name, &vp->x, 1.0f, 1.0f, 1024.0f, "%.0f");
+            if (v == ImNodalStyleVar_SlotMinSize) {
+                // Pixel-ish small range — used as the empty-slot Dummy size.
+                ImGui::DragFloat2(name, &vp->x, 0.5f, 0.0f, 64.0f, "%.1f");
+            } else {
+                // Grid metrics are integer-ish; keep step at 1 and clamp to >=1
+                // so the user can't dial them to zero (would divide-by-zero in
+                // grid drawing).
+                ImGui::DragFloat2(name, &vp->x, 1.0f, 1.0f, 1024.0f, "%.0f");
+            }
         }
         ImGui::PopID();
     }
@@ -968,9 +998,9 @@ IMNODAL_API void NewFrame() {
 // -----------------------------
 IMNODAL_API bool DebugCheckVersion(const char* aVersion, size_t aSettingsSize) {
     const bool vers = (aVersion != nullptr) && (std::strcmp(aVersion, IMNODAL_VERSION) == 0);
-    const bool sz   = (aSettingsSize == sizeof(CanvasSettings));
+    const bool sz = (aSettingsSize == sizeof(CanvasSettings));
     IM_ASSERT(vers && "ImNodal version mismatch");
-    IM_ASSERT(sz   && "ImNodal CanvasSettings size mismatch");
+    IM_ASSERT(sz && "ImNodal CanvasSettings size mismatch");
     return vers && sz;
 }
 
@@ -981,15 +1011,15 @@ IMNODAL_API bool BeginCanvas(const char* aId, const ImVec2& aSize, const CanvasS
 
     rCtx.settings = arSettings;
 
-    rCtx.widgetPos  = ImGui::GetCursorScreenPos();
+    rCtx.widgetPos = ImGui::GetCursorScreenPos();
     rCtx.widgetSize = s_selectPositive(aSize, ImGui::GetContentRegionAvail());
     rCtx.widgetRect = ImRect(rCtx.widgetPos, rCtx.widgetPos + rCtx.widgetSize);
-    rCtx.drawList   = ImGui::GetWindowDrawList();
+    rCtx.drawList = ImGui::GetWindowDrawList();
 
     // Auto-center the view on the first successful Begin
     if (!rCtx.viewInitialized) {
-        rCtx.origin   = rCtx.widgetSize * 0.5f;
-        rCtx.scale    = 1.0f;
+        rCtx.origin = rCtx.widgetSize * 0.5f;
+        rCtx.scale = 1.0f;
         rCtx.invScale = 1.0f;
         rCtx.viewInitialized = true;
     }
@@ -1000,7 +1030,7 @@ IMNODAL_API bool BeginCanvas(const char* aId, const ImVec2& aSize, const CanvasS
         return false;
     }
 
-    rCtx.expectedChannel       = rCtx.drawList->_Splitter._Current;
+    rCtx.expectedChannel = rCtx.drawList->_Splitter._Current;
     rCtx.windowCursorMaxBackup = ImGui::GetCurrentWindow()->DC.CursorMaxPos;
 
     // Block window-move ONLY when the mouse is inside the canvas area. This
@@ -1056,13 +1086,10 @@ IMNODAL_API void EndCanvas() {
     // sont dessines via DrawList sans ItemAdd, donc IsAnyItemHovered les
     // ignore — sans ce check, double-cliquer sur un lien ferait aussi fire
     // bgDoubleClicked et declencherait l'action "fit-to-view" du host).
-    const bool onEmpty = rCtx.hovered &&
-                         !ImGui::IsAnyItemHovered() &&
-                         rCtx.currentHoveredLink == 0 &&
-                         !rCtx.isPanning;
+    const bool onEmpty = rCtx.hovered && !ImGui::IsAnyItemHovered() && rCtx.currentHoveredLink == 0 && !rCtx.isPanning;
     if (onEmpty) {
-        rCtx.bgClicked          = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
-        rCtx.bgDoubleClicked    = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+        rCtx.bgClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        rCtx.bgDoubleClicked = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
         rCtx.bgCtxMenuRequested = ImGui::IsMouseClicked(rCtx.settings.contextMenuButton);
     } else {
         rCtx.bgClicked = false;
@@ -1080,17 +1107,31 @@ IMNODAL_API void EndCanvas() {
 // -----------------------------
 // Queries
 // -----------------------------
-IMNODAL_API bool IsCanvasHovered()                 { return s_getCtx().hovered; }
-IMNODAL_API bool IsCanvasBackgroundClicked()       { return s_getCtx().bgClicked; }
-IMNODAL_API bool IsCanvasBackgroundDoubleClicked() { return s_getCtx().bgDoubleClicked; }
-IMNODAL_API bool IsCanvasContextMenuRequested()    { return s_getCtx().bgCtxMenuRequested; }
-IMNODAL_API bool IsCanvasPanning()                 { return s_getCtx().isPanning; }
+IMNODAL_API bool IsCanvasHovered() {
+    return s_getCtx().hovered;
+}
+IMNODAL_API bool IsCanvasBackgroundClicked() {
+    return s_getCtx().bgClicked;
+}
+IMNODAL_API bool IsCanvasBackgroundDoubleClicked() {
+    return s_getCtx().bgDoubleClicked;
+}
+IMNODAL_API bool IsCanvasContextMenuRequested() {
+    return s_getCtx().bgCtxMenuRequested;
+}
+IMNODAL_API bool IsCanvasPanning() {
+    return s_getCtx().isPanning;
+}
 
 // -----------------------------
 // View
 // -----------------------------
-IMNODAL_API ImVec2 GetCanvasOrigin() { return s_getCtx().origin; }
-IMNODAL_API float  GetCanvasScale()  { return s_getCtx().scale; }
+IMNODAL_API ImVec2 GetCanvasOrigin() {
+    return s_getCtx().origin;
+}
+IMNODAL_API float GetCanvasScale() {
+    return s_getCtx().scale;
+}
 
 IMNODAL_API void SetCanvasView(const ImVec2& aOrigin, float aScale) {
     Context& rCtx = s_getCtx();
@@ -1104,7 +1145,7 @@ IMNODAL_API void SetCanvasView(const ImVec2& aOrigin, float aScale) {
         s_updateViewTransformPos(rCtx);
     }
     if (rCtx.scale != aScale) {
-        rCtx.scale    = aScale;
+        rCtx.scale = aScale;
         rCtx.invScale = (aScale != 0.0f) ? 1.0f / aScale : 0.0f;
     }
     if (reenter) {
@@ -1119,8 +1160,8 @@ IMNODAL_API void ResetCanvasView() {
 
 IMNODAL_API void CenterCanvasOn(const ImVec2& aCanvasPos) {
     Context& rCtx = s_getCtx();
-    const ImVec2 localCenter  = s_screenToCanvas(rCtx, rCtx.widgetPos + rCtx.widgetSize * 0.5f);
-    const ImVec2 localOffset  = aCanvasPos - localCenter;
+    const ImVec2 localCenter = s_screenToCanvas(rCtx, rCtx.widgetPos + rCtx.widgetSize * 0.5f);
+    const ImVec2 localOffset = aCanvasPos - localCenter;
     const ImVec2 screenOffset = localOffset * rCtx.scale;
     SetCanvasView(rCtx.origin - screenOffset, rCtx.scale);
 }
@@ -1138,16 +1179,16 @@ IMNODAL_API void ZoomCanvasToRect(const ImVec2& aMin, const ImVec2& aMax, float 
     size = growMax - growMin;
 
     const float widgetAR = rCtx.widgetSize.x / rCtx.widgetSize.y;
-    const float rectAR   = size.x / size.y;
+    const float rectAR = size.x / size.y;
 
     float newScale;
     ImVec2 newOrigin;
     if (rectAR > widgetAR) {
-        newScale  = rCtx.widgetSize.x / size.x;
+        newScale = rCtx.widgetSize.x / size.x;
         newOrigin = growMin * -newScale;
         newOrigin.y += (rCtx.widgetSize.y - size.y * newScale) * 0.5f;
     } else {
-        newScale  = rCtx.widgetSize.y / size.y;
+        newScale = rCtx.widgetSize.y / size.y;
         newOrigin = growMin * -newScale;
         newOrigin.x += (rCtx.widgetSize.x - size.x * newScale) * 0.5f;
     }
@@ -1158,16 +1199,28 @@ IMNODAL_API void ZoomCanvasToRect(const ImVec2& aMin, const ImVec2& aMax, float 
 // -----------------------------
 // Coords
 // -----------------------------
-IMNODAL_API ImVec2 CanvasToScreen(const ImVec2& aP)  { return s_canvasToScreen(s_getCtx(), aP); }
-IMNODAL_API ImVec2 ScreenToCanvas(const ImVec2& aP)  { return s_screenToCanvas(s_getCtx(), aP); }
-IMNODAL_API ImVec2 CanvasToScreenV(const ImVec2& aV) { return aV * s_getCtx().scale; }
-IMNODAL_API ImVec2 ScreenToCanvasV(const ImVec2& aV) { return aV * s_getCtx().invScale; }
+IMNODAL_API ImVec2 CanvasToScreen(const ImVec2& aP) {
+    return s_canvasToScreen(s_getCtx(), aP);
+}
+IMNODAL_API ImVec2 ScreenToCanvas(const ImVec2& aP) {
+    return s_screenToCanvas(s_getCtx(), aP);
+}
+IMNODAL_API ImVec2 CanvasToScreenV(const ImVec2& aV) {
+    return aV * s_getCtx().scale;
+}
+IMNODAL_API ImVec2 ScreenToCanvasV(const ImVec2& aV) {
+    return aV * s_getCtx().invScale;
+}
 
 // -----------------------------
 // Rects
 // -----------------------------
-IMNODAL_API ImRect GetCanvasRect()     { return s_getCtx().widgetRect; }
-IMNODAL_API ImRect GetCanvasViewRect() { return s_getCtx().viewRect; }
+IMNODAL_API ImRect GetCanvasRect() {
+    return s_getCtx().widgetRect;
+}
+IMNODAL_API ImRect GetCanvasViewRect() {
+    return s_getCtx().viewRect;
+}
 
 // -----------------------------
 // Suspend / Resume
@@ -1202,14 +1255,14 @@ IMNODAL_API void DrawCanvasGrid() {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.active && "DrawCanvasGrid outside of Begin/EndCanvas");
 
-    const Style& s       = rCtx.style;
-    auto* const pDrawList= rCtx.drawList;
-    const ImVec2 offset  = rCtx.origin * rCtx.invScale;
-    const ImVec2 winPos  = rCtx.viewRect.Min;
-    const ImVec2 size    = rCtx.viewRect.GetSize();
-    const ImU32  majorCol = s.Colors[ImNodalCol_GridLine];
-    const ImU32  minorCol = s.Colors[ImNodalCol_GridSubLine];
-    const ImVec2 gridSize    = s.GridSize;
+    const Style& s = rCtx.style;
+    auto* const pDrawList = rCtx.drawList;
+    const ImVec2 offset = rCtx.origin * rCtx.invScale;
+    const ImVec2 winPos = rCtx.viewRect.Min;
+    const ImVec2 size = rCtx.viewRect.GetSize();
+    const ImU32 majorCol = s.Colors[ImNodalCol_GridLine];
+    const ImU32 minorCol = s.Colors[ImNodalCol_GridSubLine];
+    const ImVec2 gridSize = s.GridSize;
     const ImVec2 gridSubdivs = s.GridSubdivs;
 
     // Major lines
@@ -1247,13 +1300,13 @@ namespace {
 //   UserFg : where GetNodeForegroundDrawList() drops user shapes — above
 //            the user widgets but below the drag-preview overlay.
 enum GraphChannel {
-    GC_Links      = 0,  // links drawn under everything else
+    GC_Links = 0,       // links drawn under everything else
     GC_Background = 1,  // node bg + border + slot dots
-    GC_UserBg     = 2,  // user-drawn overlays under content
-    GC_Content    = 3,  // user widgets inside nodes
-    GC_UserFg     = 4,  // user-drawn overlays above content
-    GC_Overlay    = 5,  // box-select, drag-preview link (topmost)
-    GC_Count      = 6,
+    GC_UserBg = 2,      // user-drawn overlays under content
+    GC_Content = 3,     // user widgets inside nodes
+    GC_UserFg = 4,      // user-drawn overlays above content
+    GC_Overlay = 5,     // box-select, drag-preview link (topmost)
+    GC_Count = 6,
 };
 
 // Hash Id(u64) -> ImGuiID(u32). ImGui uses u32 internally; we need to push
@@ -1288,8 +1341,8 @@ static void s_selectNode(GraphState& arGraph, Id aId, bool aToggle) {
         }
         arGraph.selectionChangedThisFrame = true;
     } else {
-        const bool wasOnly  = arGraph.selectedNodes.size() == 1 && *arGraph.selectedNodes.begin() == aId;
-        const bool noLinks  = arGraph.selectedLinks.empty();
+        const bool wasOnly = arGraph.selectedNodes.size() == 1 && *arGraph.selectedNodes.begin() == aId;
+        const bool noLinks = arGraph.selectedLinks.empty();
         if (!wasOnly || !noLinks) {
             arGraph.selectedNodes.clear();
             arGraph.selectedLinks.clear();
@@ -1313,8 +1366,8 @@ static void s_selectLink(GraphState& arGraph, Id aId, bool aToggle) {
         }
         arGraph.selectionChangedThisFrame = true;
     } else {
-        const bool wasOnly  = arGraph.selectedLinks.size() == 1 && *arGraph.selectedLinks.begin() == aId;
-        const bool noNodes  = arGraph.selectedNodes.empty();
+        const bool wasOnly = arGraph.selectedLinks.size() == 1 && *arGraph.selectedLinks.begin() == aId;
+        const bool noNodes = arGraph.selectedNodes.empty();
         if (!wasOnly || !noNodes) {
             arGraph.selectedNodes.clear();
             arGraph.selectedLinks.clear();
@@ -1349,45 +1402,48 @@ static bool s_multiSelectHeld(const GraphState& arGraph) {
 // (aMin, aMax). Returns true if either endpoint is inside, OR if the segment
 // crosses the box. Used by the box-select to test bezier samples chord by
 // chord — catches cases where the curve dips into the box between samples.
-static bool s_segmentIntersectsRect(const ImVec2& aA, const ImVec2& aB,
-                                    const ImVec2& aMin, const ImVec2& aMax) {
-    const auto inside = [&](const ImVec2& p) {
-        return p.x >= aMin.x && p.x <= aMax.x && p.y >= aMin.y && p.y <= aMax.y;
-    };
-    if (inside(aA) || inside(aB)) return true;
+static bool s_segmentIntersectsRect(const ImVec2& aA, const ImVec2& aB, const ImVec2& aMin, const ImVec2& aMax) {
+    const auto inside = [&](const ImVec2& p) { return p.x >= aMin.x && p.x <= aMax.x && p.y >= aMin.y && p.y <= aMax.y; };
+    if (inside(aA) || inside(aB))
+        return true;
     const ImVec2 d(aB.x - aA.x, aB.y - aA.y);
     float tMin = 0.0f, tMax = 1.0f;
     auto clip = [&](float dirP, float minP, float maxP, float startP) {
-        if (std::fabs(dirP) < 1e-6f) return !(startP < minP || startP > maxP);
+        if (std::fabs(dirP) < 1e-6f)
+            return !(startP < minP || startP > maxP);
         float t1 = (minP - startP) / dirP;
         float t2 = (maxP - startP) / dirP;
-        if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
-        if (t1 > tMin) tMin = t1;
-        if (t2 < tMax) tMax = t2;
+        if (t1 > t2) {
+            float tmp = t1;
+            t1 = t2;
+            t2 = tmp;
+        }
+        if (t1 > tMin)
+            tMin = t1;
+        if (t2 < tMax)
+            tMax = t2;
         return tMin <= tMax;
     };
-    if (!clip(d.x, aMin.x, aMax.x, aA.x)) return false;
-    if (!clip(d.y, aMin.y, aMax.y, aA.y)) return false;
+    if (!clip(d.x, aMin.x, aMax.x, aA.x))
+        return false;
+    if (!clip(d.y, aMin.y, aMax.y, aA.y))
+        return false;
     return tMin <= 1.0f && tMax >= 0.0f;
 }
 
 // Sample the cubic bezier into N chords and return true as soon as one
 // chord intersects the AABB. Catches all curve-vs-box overlaps including
 // when the curve only clips a corner of the box.
-static bool s_bezierIntersectsRect(const ImVec2& aP0, const ImVec2& aP1,
-                                   const ImVec2& aP2, const ImVec2& aP3,
-                                   const ImVec2& aMin, const ImVec2& aMax) {
+static bool
+s_bezierIntersectsRect(const ImVec2& aP0, const ImVec2& aP1, const ImVec2& aP2, const ImVec2& aP3, const ImVec2& aMin, const ImVec2& aMax) {
     constexpr int kSamples = 32;
     ImVec2 prev = aP0;
     for (int i = 1; i <= kSamples; ++i) {
         const float t = (float)i / (float)kSamples;
         const float u = 1.0f - t;
-        const ImVec2 pt =
-            aP0 * (u * u * u) +
-            aP1 * (3.0f * u * u * t) +
-            aP2 * (3.0f * u * t * t) +
-            aP3 * (t * t * t);
-        if (s_segmentIntersectsRect(prev, pt, aMin, aMax)) return true;
+        const ImVec2 pt = aP0 * (u * u * u) + aP1 * (3.0f * u * u * t) + aP2 * (3.0f * u * t * t) + aP3 * (t * t * t);
+        if (s_segmentIntersectsRect(prev, pt, aMin, aMax))
+            return true;
         prev = pt;
     }
     return false;
@@ -1454,8 +1510,8 @@ IMNODAL_API void EndGraph() {
     // mousePosBackup is screen-space (used for canvas hover); io.MousePos is
     // local-space inside BeginCanvas — we use the local mouse for everything
     // related to node/link rects so it scales with the zoom.
-    const bool lmbClicked  = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
-    const bool lmbDown     = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    const bool lmbClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const bool lmbDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
     const bool lmbReleased = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
     const bool lmbOnCanvas = ImGui::IsWindowHovered() && rCtx.widgetRect.Contains(rCtx.mousePosBackup);
     const ImVec2 mouseLocal = ImGui::GetIO().MousePos;
@@ -1480,7 +1536,7 @@ IMNODAL_API void EndGraph() {
         const ImVec2 d = rCtx.mousePosBackup - rCtx.pendingBgClickPosScreen;
         constexpr float kThreshold = 4.0f;  // screen-pixels
         if ((d.x * d.x + d.y * d.y) > (kThreshold * kThreshold)) {
-            rCtx.boxSelectActive  = true;
+            rCtx.boxSelectActive = true;
             rCtx.boxSelectGraphId = rGraph.id;
             // Le start de la box doit etre en CANVAS-SPACE actuel : on
             // re-projette la position screen au clic via la transform
@@ -1507,18 +1563,19 @@ IMNODAL_API void EndGraph() {
             const ImVec2 mn(ImMin(rCtx.boxSelectStart.x, mouseLocal.x), ImMin(rCtx.boxSelectStart.y, mouseLocal.y));
             const ImVec2 mx(ImMax(rCtx.boxSelectStart.x, mouseLocal.x), ImMax(rCtx.boxSelectStart.y, mouseLocal.y));
             const bool toggle = s_multiSelectHeld(rGraph);
-            if (!toggle) s_clearSelection(rGraph);
+            if (!toggle)
+                s_clearSelection(rGraph);
 
             // Nodes : selectionnes des que leur rect VISUEL intersecte le box
             // (overlap AABB-AABB). Plus tolerant que "centre dans le box" :
             // un coin du node qui touche le box suffit.
             for (const auto& kv : rCtx.nodes) {
-                if (kv.second.graphId != rGraph.id) continue;
+                if (kv.second.graphId != rGraph.id)
+                    continue;
                 const ImRect& r = kv.second.lastScreenRect;
-                if (r.Min.x >= r.Max.x) continue;
-                const bool overlaps =
-                    r.Min.x <= mx.x && r.Max.x >= mn.x &&
-                    r.Min.y <= mx.y && r.Max.y >= mn.y;
+                if (r.Min.x >= r.Max.x)
+                    continue;
+                const bool overlaps = r.Min.x <= mx.x && r.Max.x >= mn.x && r.Min.y <= mx.y && r.Max.y >= mn.y;
                 if (overlaps) {
                     if (rGraph.selectedNodes.insert(kv.first).second) {
                         rGraph.lastSelectedNode = kv.first;
@@ -1530,19 +1587,18 @@ IMNODAL_API void EndGraph() {
             // le box, meme partiellement. On sample en chords et on teste
             // chord-vs-rect — un seul "frolement" suffit.
             for (const auto& kv : rCtx.links) {
-                if (kv.second.graphId != rGraph.id) continue;
-                if (!kv.second.bezierCached) continue;
-                if (s_bezierIntersectsRect(
-                        kv.second.cachedFromPos, kv.second.cachedP1,
-                        kv.second.cachedP2,     kv.second.cachedToPos,
-                        mn, mx)) {
+                if (kv.second.graphId != rGraph.id)
+                    continue;
+                if (!kv.second.bezierCached)
+                    continue;
+                if (s_bezierIntersectsRect(kv.second.cachedFromPos, kv.second.cachedP1, kv.second.cachedP2, kv.second.cachedToPos, mn, mx)) {
                     if (rGraph.selectedLinks.insert(kv.first).second) {
                         rGraph.lastSelectedLink = kv.first;
                         rGraph.selectionChangedThisFrame = true;
                     }
                 }
             }
-            rCtx.boxSelectActive  = false;
+            rCtx.boxSelectActive = false;
             rCtx.boxSelectGraphId = 0;
         } else {
             // Plain bg-click → clear selection unless multi-modifier is held.
@@ -1550,47 +1606,42 @@ IMNODAL_API void EndGraph() {
                 s_clearSelection(rGraph);
             }
         }
-        rCtx.pendingBgClick    = false;
+        rCtx.pendingBgClick = false;
         rCtx.pendingBgClickPos = ImVec2(0.0f, 0.0f);
     }
     // Reset for next frame
     rGraph.clickConsumedThisFrame = false;
 
-    // ---- Deferred slot dot draw ----
-    // EndSlot stashed slot ids here; Link() updated their connected flag
-    // since then. NOW we know which color to use for each dot. We also draw
-    // a button-style "hover frame" around the slot's hit rect when hovered —
-    // gives the user a clear visual that the slot is interactive (just like
-    // an ImGui::Button highlights on hover).
+    // ---- Slot interaction halo ----
+    // BeginSlot/EndSlot itself paints nothing visible — the host owns the
+    // dot/icon/widget rendering. EndGraph still paints a button-style hover
+    // frame around the slot's hit rect so the user has a clear "this region
+    // is interactive" feedback (just like ImGui::Button's hover highlight).
+    // Reroute slots skip the halo : their feedback is the dot/ring the host
+    // paints, driven by IsSlotHovered / IsNodeSelected.
     if (!rGraph.frameSlotOrder.empty()) {
         pDrawList->ChannelsSetCurrent(GC_Background);
         constexpr float kHoverRounding = 3.0f;
-        const ImU32 kHoverFill   = rCtx.style.Colors[ImNodalCol_SlotHoverFill];
+        const ImU32 kHoverFill = rCtx.style.Colors[ImNodalCol_SlotHoverFill];
         const ImU32 kHoverBorder = rCtx.style.Colors[ImNodalCol_SlotHoverBorder];
         for (Id sid : rGraph.frameSlotOrder) {
             auto it = rCtx.slots.find(sid);
-            if (it == rCtx.slots.end()) continue;
+            if (it == rCtx.slots.end())
+                continue;
             const SlotState& s = it->second;
-            // Pour un slot dont le node parent est un reroute : pas de halo
-            // de hover etendu — il prendrait la place de la frame de selection
-            // (qui est un peu plus grande que le dot) et le user ne pourrait
-            // plus cliquer DANS la zone du frame pour selectionner. On laisse
-            // juste le dot changer de couleur via dotColorHovered (le seul
-            // retour visuel sur reroute, comme dans Unreal).
+            // Reroute slots : skip the rectangular halo. The host renders
+            // a circular ring/dot (see BeginRerouteNode docs) so the rect
+            // would clash visually and steal click area meant for the node.
             bool isOnReroute = false;
             if (s.parentNode != 0) {
                 auto nIt = rCtx.nodes.find(s.parentNode);
-                if (nIt != rCtx.nodes.end()) isOnReroute = nIt->second.isReroute;
+                if (nIt != rCtx.nodes.end())
+                    isOnReroute = nIt->second.isReroute;
             }
             if (s.hovered && !isOnReroute && s.lastHitRect.Min.x < s.lastHitRect.Max.x) {
                 pDrawList->AddRectFilled(s.lastHitRect.Min, s.lastHitRect.Max, kHoverFill, kHoverRounding);
                 pDrawList->AddRect(s.lastHitRect.Min, s.lastHitRect.Max, kHoverBorder, kHoverRounding, 0, 1.0f);
             }
-            // Dot on top.
-            const ImU32 col = s.hovered   ? s.dotColorHovered
-                            : s.connected ? s.dotColorConnected
-                            :               s.dotColor;
-            pDrawList->AddCircleFilled(s.screenPos, s.dotRadius, col);
         }
         pDrawList->ChannelsSetCurrent(GC_Content);
     }
@@ -1627,7 +1678,7 @@ IMNODAL_API bool BeginNode(Id aNodeId, ImVec2* apPos, const NodeSettings& arSett
     rNode.settings = arSettings;
     rNode.hasHeader = false;
     rNode.bodyColumnOpened = false;
-    rNode.isReroute = false;        // BeginRerouteNode re-set this AFTER BeginNode if needed
+    rNode.isReroute = false;  // BeginRerouteNode re-set this AFTER BeginNode if needed
     rNode.rerouteSlotId = 0;
     rNode.userPosPtr = apPos;
 
@@ -1676,12 +1727,11 @@ IMNODAL_API void EndNode() {
     // -> distance au centre du dot, rayon legerement superieur a la zone visuelle.
     if (rNode.isReroute) {
         auto sIt = rCtx.slots.find(rNode.rerouteSlotId);
-        const ImVec2 center = (sIt != rCtx.slots.end())
-            ? sIt->second.screenPos
-            : ImVec2((nodeMin.x + nodeMax.x) * 0.5f, (nodeMin.y + nodeMax.y) * 0.5f);
-        const float dotR  = (sIt != rCtx.slots.end()) ? sIt->second.dotRadius : 5.0f;
-        const float hitR  = dotR + 6.0f;
-        const ImVec2 mp   = ImGui::GetIO().MousePos;
+        const ImVec2 center =
+            (sIt != rCtx.slots.end()) ? sIt->second.screenPos : ImVec2((nodeMin.x + nodeMax.x) * 0.5f, (nodeMin.y + nodeMax.y) * 0.5f);
+        const float baseR = (rNode.rerouteHitRadius > 0.0f) ? rNode.rerouteHitRadius : rCtx.style.SlotDotRadius;
+        const float hitR = baseR + 6.0f;
+        const ImVec2 mp = ImGui::GetIO().MousePos;
         const float dx = mp.x - center.x;
         const float dy = mp.y - center.y;
         rNode.hovered = (dx * dx + dy * dy <= hitR * hitR) && ImGui::IsWindowHovered();
@@ -1693,10 +1743,10 @@ IMNODAL_API void EndNode() {
     }
 
     // ---- Selection + drag (left-click-hold on the node rect) ----
-    const bool lmbClicked   = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
-    const bool lmbDown      = ImGui::IsMouseDown(ImGuiMouseButton_Left);
-    const bool lmbReleased  = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
-    const bool rmbClicked   = ImGui::IsMouseClicked(rCtx.settings.contextMenuButton);
+    const bool lmbClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const bool lmbDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    const bool lmbReleased = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+    const bool rmbClicked = ImGui::IsMouseClicked(rCtx.settings.contextMenuButton);
     // "topmost" = mouse on node AND no user widget is above the cursor.
     const bool hoveredTopMost = rNode.hovered && !ImGui::IsAnyItemHovered();
 
@@ -1744,8 +1794,10 @@ IMNODAL_API void EndNode() {
 
     const Style& s = rCtx.style;
     const float rounding = s.NodeRounding;
-    // Body fill
-    pDrawList->AddRectFilled(nodeMin, nodeMax, s.Colors[ImNodalCol_NodeBody], rounding);
+    // Body fill — skipped for reroutes (host paints its own dot + ring).
+    if (!rNode.isReroute) {
+        pDrawList->AddRectFilled(nodeMin, nodeMax, s.Colors[ImNodalCol_NodeBody], rounding);
+    }
     // Header tint (if header was emitted)
     if (rNode.hasHeader) {
         ImRect hdr = rNode.headerScreenRect;
@@ -1756,22 +1808,12 @@ IMNODAL_API void EndNode() {
         hdr.Max.x = nodeMax.x;
         pDrawList->AddRectFilled(hdr.Min, hdr.Max, s.Colors[ImNodalCol_NodeHeader], rounding, ImDrawFlags_RoundCornersTop);
     }
-    // Border (selected color overrides)
-    const ImU32 borderCol = rNode.selected
-        ? s.Colors[rNode.isReroute ? ImNodalCol_RerouteBorderSelected : ImNodalCol_NodeBorderSelected]
-        : s.Colors[rNode.isReroute ? ImNodalCol_RerouteBorder : ImNodalCol_NodeBorder];
-    if (rNode.isReroute) {
-        // Frame circulaire au centre du dot. Toujours dessinee (alpha de
-        // RerouteBorder par defaut deja faible -> faint frame en permanence ;
-        // RerouteBorderSelected plus opaque -> highlight a la selection).
-        auto sIt = rCtx.slots.find(rNode.rerouteSlotId);
-        const ImVec2 center = (sIt != rCtx.slots.end())
-            ? sIt->second.screenPos
-            : ImVec2((nodeMin.x + nodeMax.x) * 0.5f, (nodeMin.y + nodeMax.y) * 0.5f);
-        const float dotR  = (sIt != rCtx.slots.end()) ? sIt->second.dotRadius : s.SlotDotRadius;
-        const float ringR = dotR + 6.0f;
-        pDrawList->AddCircle(center, ringR, borderCol, 0, s.NodeBorderThickness);
-    } else {
+    // Border (selected color overrides). Reroute nodes skip the rectangular
+    // border : the host paints its own dot + selection ring around it (see
+    // BeginRerouteNode docs). We keep the body fill above invisible too by
+    // not drawing anything here for reroutes.
+    if (!rNode.isReroute) {
+        const ImU32 borderCol = rNode.selected ? s.Colors[ImNodalCol_NodeBorderSelected] : s.Colors[ImNodalCol_NodeBorder];
         pDrawList->AddRect(nodeMin, nodeMax, borderCol, rounding, 0, s.NodeBorderThickness);
     }
 
@@ -1840,12 +1882,24 @@ static void s_endBodyColumn(Context& rCtx, Context::Section aSec) {
     rCtx.currentSection = Context::Section_None;
 }
 
-IMNODAL_API bool BeginInputs()  { return s_beginBodyColumn(s_getCtx(), Context::Section_Inputs,  "##imnodal_inputs"); }
-IMNODAL_API void EndInputs()    { s_endBodyColumn(s_getCtx(), Context::Section_Inputs); }
-IMNODAL_API bool BeginCenter()  { return s_beginBodyColumn(s_getCtx(), Context::Section_Center,  "##imnodal_center"); }
-IMNODAL_API void EndCenter()    { s_endBodyColumn(s_getCtx(), Context::Section_Center); }
-IMNODAL_API bool BeginOutputs() { return s_beginBodyColumn(s_getCtx(), Context::Section_Outputs, "##imnodal_outputs"); }
-IMNODAL_API void EndOutputs()   { s_endBodyColumn(s_getCtx(), Context::Section_Outputs); }
+IMNODAL_API bool BeginInputs() {
+    return s_beginBodyColumn(s_getCtx(), Context::Section_Inputs, "##imnodal_inputs");
+}
+IMNODAL_API void EndInputs() {
+    s_endBodyColumn(s_getCtx(), Context::Section_Inputs);
+}
+IMNODAL_API bool BeginCenter() {
+    return s_beginBodyColumn(s_getCtx(), Context::Section_Center, "##imnodal_center");
+}
+IMNODAL_API void EndCenter() {
+    s_endBodyColumn(s_getCtx(), Context::Section_Center);
+}
+IMNODAL_API bool BeginOutputs() {
+    return s_beginBodyColumn(s_getCtx(), Context::Section_Outputs, "##imnodal_outputs");
+}
+IMNODAL_API void EndOutputs() {
+    s_endBodyColumn(s_getCtx(), Context::Section_Outputs);
+}
 
 IMNODAL_API bool BeginFooter() {
     Context& rCtx = s_getCtx();
@@ -1903,10 +1957,12 @@ IMNODAL_API void BeginAlign(float aRatio, float aAvailableWidth) {
             auto it = rCtx.nodes.find(rCtx.currentNodeId);
             if (it != rCtx.nodes.end() && it->second.size.x > 0.0f) {
                 availW = it->second.size.x - 2.0f * rCtx.style.NodeBodyPadding;
-                if (availW < 0.0f) availW = 0.0f;
+                if (availW < 0.0f)
+                    availW = 0.0f;
             }
         }
-        if (availW <= 0.0f) availW = ImGui::GetContentRegionAvail().x;
+        if (availW <= 0.0f)
+            availW = ImGui::GetContentRegionAvail().x;
     }
 
     // First frame on this scope: lastWidth is 0 → no indent (left-aligned
@@ -1917,7 +1973,8 @@ IMNODAL_API void BeginAlign(float aRatio, float aAvailableWidth) {
         indent = aRatio * (availW - rSlot.lastWidth);
     }
     rSlot.appliedIndent = indent;
-    if (indent > 0.0f) ImGui::Indent(indent);
+    if (indent > 0.0f)
+        ImGui::Indent(indent);
 
     // Push an ID so user widgets emitted inside the alignment scope don't
     // collide with widgets sharing the same labels in sibling scopes.
@@ -1936,27 +1993,22 @@ IMNODAL_API void EndAlign() {
     ImGui::PopID();
     AlignSlot& rSlot = rCtx.alignSlots[id];
     rSlot.lastWidth = ImGui::GetItemRectSize().x;
-    if (rSlot.appliedIndent > 0.0f) ImGui::Unindent(rSlot.appliedIndent);
+    if (rSlot.appliedIndent > 0.0f)
+        ImGui::Unindent(rSlot.appliedIndent);
 }
 
 // -----------------------------
 // Slot primitive
 // -----------------------------
-IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const char* aLabel, const SlotSettings& arSettings) {
+IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const SlotSettings& arSettings) {
     Context& rCtx = s_getCtx();
     IM_ASSERT(aSlotId != 0 && "Slot id must be non-zero");
     IM_ASSERT(rCtx.currentSlotId == 0 && "Nested BeginSlot is not supported");
     SlotState& rSlot = rCtx.slots[aSlotId];
-    rSlot.parentNode        = rCtx.currentNodeId;
-    rSlot.graphId           = rCtx.currentGraphId;
-    rSlot.role              = aRole;
-    rSlot.typeTag           = arSettings.typeTag;
-    // Snapshot du style courant : la dot est dessinee plus tard dans EndGraph,
-    // a un moment ou le user a peut-etre deja fait des Pop. On capture ici.
-    rSlot.dotRadius         = rCtx.style.SlotDotRadius;
-    rSlot.dotColor          = rCtx.style.Colors[ImNodalCol_SlotDot];
-    rSlot.dotColorConnected = rCtx.style.Colors[ImNodalCol_SlotDotConnected];
-    rSlot.dotColorHovered   = rCtx.style.Colors[ImNodalCol_SlotDotHovered];
+    rSlot.parentNode = rCtx.currentNodeId;
+    rSlot.graphId = rCtx.currentGraphId;
+    rSlot.role = aRole;
+    rSlot.typeTag = arSettings.typeTag;
 
     // EARLY hover hit-test against the previous frame's hit rect. Without this,
     // rSlot.hovered would stay false until EndSlot — but the host typically
@@ -1968,8 +2020,7 @@ IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const char* aLabel, const
         const ImRect& r = rSlot.lastHitRect;
         if (r.Min.x < r.Max.x && r.Min.y < r.Max.y) {
             const ImVec2 mp = ImGui::GetIO().MousePos;
-            rSlot.hovered = (mp.x >= r.Min.x && mp.x <= r.Max.x &&
-                             mp.y >= r.Min.y && mp.y <= r.Max.y);
+            rSlot.hovered = (mp.x >= r.Min.x && mp.x <= r.Max.x && mp.y >= r.Min.y && mp.y <= r.Max.y);
         } else {
             rSlot.hovered = false;
         }
@@ -1979,23 +2030,10 @@ IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const char* aLabel, const
 
     ImGui::PushID(s_imguiId(aSlotId));
     ImGui::BeginGroup();
-
-    // Inline layout — dot sits next to the label/widget based on role:
-    //   Input  → dot first, then label/widget
-    //   Output → label/widget first, dot appended in EndSlot
-    //   InOut  → label/widget first; dot drawn centered on the group at EndSlot
-    const float padding = rSlot.dotRadius * 2.0f + 4.0f;
-    const bool  isOutput = (aRole == SlotRole_Output);
-    const bool  isInOut  = (aRole == SlotRole_InOut);
-
-    if (!isOutput && !isInOut) {
-        ImGui::Dummy(ImVec2(padding, 0.0f));
-        ImGui::SameLine(0.0f, 0.0f);
-    }
-    if (aLabel && aLabel[0] != 0) {
-        ImGui::TextUnformatted(aLabel);
-        ImGui::SameLine();
-    }
+    // Snapshot cursor right after BeginGroup. EndSlot uses this to detect a
+    // host that emitted nothing inside the slot (cursor unchanged) and inserts
+    // a (2r, 2r) Dummy so the slot still has a visible dot + hit area.
+    rCtx.currentSlotBeginCursor = ImGui::GetCursorScreenPos();
     return true;
 }
 
@@ -2006,72 +2044,64 @@ IMNODAL_API void EndSlot() {
     SlotState& rSlot = rCtx.slots[rCtx.currentSlotId];
 
     const bool isOutput = (rSlot.role == SlotRole_Output);
-    const bool isInOut  = (rSlot.role == SlotRole_InOut);
-    const float padding = rSlot.dotRadius * 2.0f + 4.0f;
+    const bool isInOut = (rSlot.role == SlotRole_InOut);
 
-    // Output / InOut: append tail padding so the dot has room on the right.
-    if (isOutput || isInOut) {
-        ImGui::SameLine(0.0f, 0.0f);
-        ImGui::Dummy(ImVec2(padding, 0.0f));
+    // Empty-slot fallback : if the host emitted nothing between BeginSlot
+    // and EndSlot, the cursor is still at the BeginGroup position. Insert a
+    // Dummy of `Style.SlotMinSize` so the slot has a hit area the host can
+    // hover and link-drag from. The host then paints its own dot/icon at
+    // GetSlotScreenPos(slotId).
+    {
+        const ImVec2 cur = ImGui::GetCursorScreenPos();
+        if (cur.x == rCtx.currentSlotBeginCursor.x && cur.y == rCtx.currentSlotBeginCursor.y) {
+            ImGui::Dummy(rCtx.style.SlotMinSize);
+        }
     }
 
     ImGui::EndGroup();
     const ImVec2 gMin = ImGui::GetItemRectMin();
     const ImVec2 gMax = ImGui::GetItemRectMax();
-    const float yMid  = (gMin.y + gMax.y) * 0.5f;
 
-    // Pivot override (set via SlotDotPivotAlignment / SlotDotPivotOffset between
-    // BeginSlot and EndSlot) — replaces the role-based default. Tangent is
-    // auto-derived from the alignment so the link curves leave the slot toward
-    // the dominant side of the override.
-    const bool pivotOverride = (rCtx.slotPivotAlignment.x >= 0.0f && rCtx.slotPivotAlignment.y >= 0.0f);
-    if (pivotOverride) {
-        const ImVec2 size = gMax - gMin;
-        rSlot.screenPos = gMin + size * rCtx.slotPivotAlignment + rCtx.slotPivotOffset;
-        const float dx = rCtx.slotPivotAlignment.x - 0.5f;
-        const float dy = rCtx.slotPivotAlignment.y - 0.5f;
-        if (std::fabs(dx) >= std::fabs(dy)) {
-            rSlot.tangent = ImVec2(dx >= 0.0f ? 1.0f : -1.0f, 0.0f);
-        } else {
-            rSlot.tangent = ImVec2(0.0f, dy >= 0.0f ? 1.0f : -1.0f);
-        }
-    } else if (isInOut) {
-        // Centered on the group rect; tangent sentinel (0,0) → resolved
-        // dynamically at link draw time from the other endpoint direction.
-        const float xMid = (gMin.x + gMax.x) * 0.5f;
-        rSlot.screenPos = ImVec2(xMid, yMid);
-        rSlot.tangent   = ImVec2(0.0f, 0.0f);
-    } else if (isOutput) {
-        rSlot.screenPos = ImVec2(gMax.x - rSlot.dotRadius, yMid);
-        rSlot.tangent   = ImVec2(1.0f, 0.0f);
-    } else {
-        rSlot.screenPos = ImVec2(gMin.x + rSlot.dotRadius, yMid);
-        rSlot.tangent   = ImVec2(-1.0f, 0.0f);
-    }
-    // Reset pivot override for the next slot.
-    rCtx.slotPivotAlignment = ImVec2(-1.0f, -1.0f);
-    rCtx.slotPivotOffset    = ImVec2(0.0f, 0.0f);
+    // Pivot rect — same model as thedmd/imgui-node-editor.
+    //   pivot.Min = group.Min + group.Size * slotAlignment
+    //   pivot.Max = pivot.Min + slotSize
+    // Defaults : slotAlignment = (0.5, 0.5) (group center), slotSize = (0,0)
+    // (point pivot). Hosts override per-slot via SlotAlignment / SlotSize.
+    const ImVec2 gSize = gMax - gMin;
+    const ImVec2 pivotMin = gMin + gSize * rCtx.slotAlignment;
+    const ImVec2 pivotMax = pivotMin + rCtx.slotSize;
+    rSlot.screenPos = (pivotMin + pivotMax) * 0.5f + rCtx.slotPivotOffset;
+    // Tangent comes from the role only (never from the pivot alignment).
+    // InOut keeps the (0,0) sentinel : link draw resolves the direction from
+    // the other endpoint.
+    if (isInOut)        rSlot.tangent = ImVec2(0.0f, 0.0f);
+    else if (isOutput)  rSlot.tangent = ImVec2(1.0f, 0.0f);
+    else                rSlot.tangent = ImVec2(-1.0f, 0.0f);
+    // Reset pivot override for the next slot — back to thedmd defaults.
+    rCtx.slotAlignment = ImVec2(0.5f, 0.5f);
+    rCtx.slotSize = ImVec2(0.0f, 0.0f);
+    rCtx.slotPivotOffset = ImVec2(0.0f, 0.0f);
 
-    // Hit area : par defaut tout le rect du groupe + un halo autour du dot.
-    // EXCEPTION pour un slot de reroute : on restreint au DOT lui-meme. Sinon
-    // la zone autour du dot serait happee par le slot (= drag de lien) et le
-    // user ne pourrait plus cliquer "a cote" pour selectionner / bouger le
-    // node. UE-style : hover sur le dot = lien, hover sur le reste = node.
+    // Hit area : the group rect, no inflation. ImNodal does not draw the dot
+    // anymore so there's no halo to extend. EXCEPTION : on a reroute slot we
+    // restrict to a circle (rerouteHitRadius) around the screenPos so the
+    // empty quadrants of the group rect don't grab clicks meant for the
+    // node body — UE-style "dot grabs link, node grabs drag".
     bool slotOnReroute = false;
+    float rerouteHitRadius = 0.0f;
     if (rCtx.currentNodeId != 0) {
         auto nIt = rCtx.nodes.find(rCtx.currentNodeId);
-        if (nIt != rCtx.nodes.end()) slotOnReroute = nIt->second.isReroute;
+        if (nIt != rCtx.nodes.end()) {
+            slotOnReroute = nIt->second.isReroute;
+            rerouteHitRadius = nIt->second.rerouteHitRadius;
+        }
     }
     ImRect hitBB;
-    if (slotOnReroute) {
-        const float r = rSlot.dotRadius;
-        hitBB = ImRect(rSlot.screenPos - ImVec2(r, r),
-                       rSlot.screenPos + ImVec2(r, r));
+    if (slotOnReroute && rerouteHitRadius > 0.0f) {
+        hitBB = ImRect(rSlot.screenPos - ImVec2(rerouteHitRadius, rerouteHitRadius),
+                       rSlot.screenPos + ImVec2(rerouteHitRadius, rerouteHitRadius));
     } else {
-        const float pad = rSlot.dotRadius + 4.0f;
-        hitBB = ImRect(
-            ImMin(gMin, rSlot.screenPos - ImVec2(pad, pad)),
-            ImMax(gMax, rSlot.screenPos + ImVec2(pad, pad)));
+        hitBB = ImRect(gMin, gMax);
     }
     // Cache for next frame's BeginSlot early hover test + EndGraph hover frame.
     rSlot.lastHitRect = hitBB;
@@ -2085,8 +2115,7 @@ IMNODAL_API void EndSlot() {
     ImGui::KeepAliveID(hitId);
     bool btnHovered = false, btnHeld = false;
     if (ImGui::ItemAdd(hitBB, hitId)) {
-        ImGui::ButtonBehavior(hitBB, hitId, &btnHovered, &btnHeld,
-            ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+        ImGui::ButtonBehavior(hitBB, hitId, &btnHovered, &btnHeld, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
     }
     // Raw geometric hover in parallel: while dragging from slot A,
     // ButtonBehavior on slot B reports hovered=false (ActiveId gating).
@@ -2112,27 +2141,22 @@ IMNODAL_API void EndSlot() {
         rCtx.ctxMenuSlotId = rCtx.currentSlotId;
     }
 
-    // Dot draw — inside a graph, defer to EndGraph so the connected state
-    // (set by Link() calls happening AFTER nodes are emitted) is up-to-date.
-    // Standalone slots draw immediately since there's no later phase.
+    // Register the slot so EndGraph can paint the interaction hover frame
+    // and let Link() flip the connected flag. ImNodal does NOT draw the dot
+    // here — the host paints whatever mark it wants at GetSlotScreenPos.
     if (rCtx.graphActive) {
         rCtx.graphs[rCtx.currentGraphId].frameSlotOrder.push_back(rCtx.currentSlotId);
-    } else {
-        const ImU32 col = rSlot.hovered   ? rSlot.dotColorHovered
-                        : rSlot.connected ? rSlot.dotColorConnected
-                        :                   rSlot.dotColor;
-        ImGui::GetWindowDrawList()->AddCircleFilled(rSlot.screenPos, rSlot.dotRadius, col);
     }
 
     ImGui::PopID();
     rCtx.currentSlotId = 0;
 }
 
-IMNODAL_API bool BeginInputSlot(Id aSlotId, const char* aLabel, const SlotSettings& arSettings) {
-    return BeginSlot(aSlotId, SlotRole_Input, aLabel, arSettings);
+IMNODAL_API bool BeginInputSlot(Id aSlotId, const SlotSettings& arSettings) {
+    return BeginSlot(aSlotId, SlotRole_Input, arSettings);
 }
-IMNODAL_API bool BeginOutputSlot(Id aSlotId, const char* aLabel, const SlotSettings& arSettings) {
-    return BeginSlot(aSlotId, SlotRole_Output, aLabel, arSettings);
+IMNODAL_API bool BeginOutputSlot(Id aSlotId, const SlotSettings& arSettings) {
+    return BeginSlot(aSlotId, SlotRole_Output, arSettings);
 }
 
 // -----------------------------
@@ -2168,7 +2192,8 @@ IMNODAL_API bool IsNodeHovered(Id* apoNodeId) {
         Id nid = rGraph.frameNodeOrder[i];
         auto it = rCtx.nodes.find(nid);
         if (it != rCtx.nodes.end() && it->second.hovered) {
-            if (apoNodeId) *apoNodeId = nid;
+            if (apoNodeId)
+                *apoNodeId = nid;
             return true;
         }
     }
@@ -2263,16 +2288,16 @@ namespace {
 // Cubic-Bezier control points from two anchor points + outward tangents.
 // Control point distance scales with the separation so the curve "breathes"
 // nicely when slots are far/close.
-inline void s_bezierCtrl(const ImVec2& aFrom, const ImVec2& aFromTangent,
-                         const ImVec2& aTo,   const ImVec2& aToTangent,
-                         ImVec2& arP1, ImVec2& arP2) {
+inline void s_bezierCtrl(const ImVec2& aFrom, const ImVec2& aFromTangent, const ImVec2& aTo, const ImVec2& aToTangent, ImVec2& arP1, ImVec2& arP2) {
     const float dx = aTo.x - aFrom.x;
     const float dy = aTo.y - aFrom.y;
     float d = std::sqrt(dx * dx + dy * dy) * 0.4f;
-    if (d < 30.0f) d = 30.0f;
-    if (d > 200.0f) d = 200.0f;
+    if (d < 30.0f)
+        d = 30.0f;
+    if (d > 200.0f)
+        d = 200.0f;
     arP1 = aFrom + aFromTangent * d;
-    arP2 = aTo   + aToTangent   * d;
+    arP2 = aTo + aToTangent * d;
 }
 
 // Resolve a slot's tangent. InOut slots use a sentinel (0,0) and get a tangent
@@ -2290,10 +2315,14 @@ static ImVec2 s_resolveTangent(const SlotState& arSlot, const ImVec2& aOtherPos)
     return arSlot.tangent;
 }
 
-static void s_drawBezierLink(ImDrawList* apDrawList,
-                             const ImVec2& aFrom, const ImVec2& aFromTangent,
-                             const ImVec2& aTo,   const ImVec2& aToTangent,
-                             ImU32 aColor, float aThickness) {
+static void s_drawBezierLink(
+    ImDrawList* apDrawList,
+    const ImVec2& aFrom,
+    const ImVec2& aFromTangent,
+    const ImVec2& aTo,
+    const ImVec2& aToTangent,
+    ImU32 aColor,
+    float aThickness) {
     ImVec2 p1, p2;
     s_bezierCtrl(aFrom, aFromTangent, aTo, aToTangent, p1, p2);
     apDrawList->AddBezierCubic(aFrom, p1, p2, aTo, aColor, aThickness);
@@ -2301,20 +2330,14 @@ static void s_drawBezierLink(ImDrawList* apDrawList,
 
 // Hit-test: is the mouse within `aThreshold` of the cubic Bézier curve?
 // Approximated by sampling the curve into N line segments.
-static bool s_isMouseOnBezier(const ImVec2& aP0, const ImVec2& aP1,
-                              const ImVec2& aP2, const ImVec2& aP3,
-                              const ImVec2& aMouse, float aThreshold) {
+static bool s_isMouseOnBezier(const ImVec2& aP0, const ImVec2& aP1, const ImVec2& aP2, const ImVec2& aP3, const ImVec2& aMouse, float aThreshold) {
     const int kSegments = 24;
     ImVec2 prev = aP0;
     const float thr2 = aThreshold * aThreshold;
     for (int i = 1; i <= kSegments; ++i) {
         const float t = (float)i / (float)kSegments;
         const float u = 1.0f - t;
-        const ImVec2 pt =
-            aP0 * (u * u * u) +
-            aP1 * (3.0f * u * u * t) +
-            aP2 * (3.0f * u * t * t) +
-            aP3 * (t * t * t);
+        const ImVec2 pt = aP0 * (u * u * u) + aP1 * (3.0f * u * u * t) + aP2 * (3.0f * u * t * t) + aP3 * (t * t * t);
         // Distance from aMouse to the segment (prev, pt).
         const ImVec2 seg = pt - prev;
         const ImVec2 toM = aMouse - prev;
@@ -2322,12 +2345,15 @@ static bool s_isMouseOnBezier(const ImVec2& aP0, const ImVec2& aP1,
         float u2 = 0.0f;
         if (len2 > 0.0f) {
             u2 = (toM.x * seg.x + toM.y * seg.y) / len2;
-            if (u2 < 0.0f) u2 = 0.0f;
-            else if (u2 > 1.0f) u2 = 1.0f;
+            if (u2 < 0.0f)
+                u2 = 0.0f;
+            else if (u2 > 1.0f)
+                u2 = 1.0f;
         }
         const ImVec2 proj = prev + seg * u2;
         const ImVec2 delta = aMouse - proj;
-        if (delta.x * delta.x + delta.y * delta.y <= thr2) return true;
+        if (delta.x * delta.x + delta.y * delta.y <= thr2)
+            return true;
         prev = pt;
     }
     return false;
@@ -2345,35 +2371,36 @@ IMNODAL_API void Link(Id aLinkId, Id aFromSlotId, Id aToSlotId, ImU32 aColor, fl
         return;
     }
     SlotState& rFrom = itF->second;
-    SlotState& rTo   = itT->second;
+    SlotState& rTo = itT->second;
 
     LinkState& rLink = rCtx.links[aLinkId];
-    rLink.fromSlot  = aFromSlotId;
-    rLink.toSlot    = aToSlotId;
-    rLink.graphId   = rCtx.currentGraphId;
+    rLink.fromSlot = aFromSlotId;
+    rLink.toSlot = aToSlotId;
+    rLink.graphId = rCtx.currentGraphId;
     // Default thickness from style if caller passed 0.
-    if (aThickness <= 0.0f) aThickness = rCtx.style.LinkThickness;
+    if (aThickness <= 0.0f)
+        aThickness = rCtx.style.LinkThickness;
     rLink.thickness = aThickness;
     // Default color from style if caller passed 0.
     const ImU32 baseColor = (aColor != 0) ? aColor : rCtx.style.Colors[ImNodalCol_Link];
-    rLink.color     = baseColor;
+    rLink.color = baseColor;
 
     rFrom.connected = true;
-    rTo.connected   = true;
+    rTo.connected = true;
 
     // Resolve tangents (InOut slots are dynamic).
     const ImVec2 fromTan = s_resolveTangent(rFrom, rTo.screenPos);
-    const ImVec2 toTan   = s_resolveTangent(rTo,   rFrom.screenPos);
+    const ImVec2 toTan = s_resolveTangent(rTo, rFrom.screenPos);
 
     // Hit-test against the bezier.
     ImVec2 p1, p2;
     s_bezierCtrl(rFrom.screenPos, fromTan, rTo.screenPos, toTan, p1, p2);
     // Cache for FlowLink() to reuse this frame.
     rLink.cachedFromPos = rFrom.screenPos;
-    rLink.cachedToPos   = rTo.screenPos;
-    rLink.cachedP1      = p1;
-    rLink.cachedP2      = p2;
-    rLink.bezierCached  = true;
+    rLink.cachedToPos = rTo.screenPos;
+    rLink.cachedP1 = p1;
+    rLink.cachedP2 = p2;
+    rLink.bezierCached = true;
 
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     const float canvasScale = rCtx.scale > 0.0f ? rCtx.scale : 1.0f;
@@ -2409,7 +2436,8 @@ IMNODAL_API void Link(Id aLinkId, Id aFromSlotId, Id aToSlotId, ImU32 aColor, fl
         }
         if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             rLink.doubleClicked = true;
-            if (pGraph) pGraph->clickConsumedThisFrame = true;
+            if (pGraph)
+                pGraph->clickConsumedThisFrame = true;
         }
         if (ImGui::IsMouseClicked(rCtx.settings.contextMenuButton)) {
             rLink.ctxMenuRequested = true;
@@ -2454,28 +2482,35 @@ IMNODAL_API bool BeginConnectionCreate() {
 }
 IMNODAL_API bool QueryNewLink(Id* apoFromSlotId, Id* apoToSlotId) {
     Context& rCtx = s_getCtx();
-    if (!s_isDragInCurrentScope(rCtx)) return false;
+    if (!s_isDragInCurrentScope(rCtx))
+        return false;
     const Id from = rCtx.draggingFromSlot;
-    const Id to   = rCtx.currentHoveredSlot;
-    if (to == 0 || to == from) return false;
+    const Id to = rCtx.currentHoveredSlot;
+    if (to == 0 || to == from)
+        return false;
     auto itF = rCtx.slots.find(from);
     auto itT = rCtx.slots.find(to);
-    if (itF == rCtx.slots.end() || itT == rCtx.slots.end()) return false;
+    if (itF == rCtx.slots.end() || itT == rCtx.slots.end())
+        return false;
     // Target must live in the same scope too (no cross-scope links in M2).
     const Id currentScope = rCtx.graphActive ? rCtx.currentGraphId : (Id)0;
-    if (itT->second.graphId != currentScope) return false;
+    if (itT->second.graphId != currentScope)
+        return false;
     // Don't offer self-connections within the same node.
     if (itF->second.parentNode != 0 && itF->second.parentNode == itT->second.parentNode) {
         return false;
     }
-    if (apoFromSlotId) *apoFromSlotId = from;
-    if (apoToSlotId)   *apoToSlotId   = to;
+    if (apoFromSlotId)
+        *apoFromSlotId = from;
+    if (apoToSlotId)
+        *apoToSlotId = to;
     return true;
 }
 
 IMNODAL_API bool AcceptNewLink(ImU32 aColor) {
     Context& rCtx = s_getCtx();
-    if (!s_isDragInCurrentScope(rCtx)) return false;
+    if (!s_isDragInCurrentScope(rCtx))
+        return false;
     rCtx.connAcceptedThisFrame = true;
     rCtx.connAcceptColor = (aColor != 0) ? aColor : rCtx.style.Colors[ImNodalCol_LinkPreviewAccept];
     rCtx.connRejectReason = nullptr;
@@ -2488,7 +2523,8 @@ IMNODAL_API bool AcceptNewLink(ImU32 aColor) {
 
 IMNODAL_API void RejectNewLink(const char* aReason) {
     Context& rCtx = s_getCtx();
-    if (!s_isDragInCurrentScope(rCtx)) return;
+    if (!s_isDragInCurrentScope(rCtx))
+        return;
     rCtx.connAcceptedThisFrame = false;
     rCtx.connAcceptColor = 0;
     rCtx.connRejectReason = aReason ? aReason : "invalid";
@@ -2499,16 +2535,21 @@ IMNODAL_API void RejectNewLink(const char* aReason) {
 // a "create node connected to this slot" popup.
 IMNODAL_API bool QueryNewNodeFromSlot(Id* apoFromSlotId) {
     Context& rCtx = s_getCtx();
-    if (!s_isDragInCurrentScope(rCtx)) return false;
-    if (rCtx.currentHoveredSlot != 0) return false;  // a target slot is hovered → that's QueryNewLink territory
-    if (apoFromSlotId) *apoFromSlotId = rCtx.draggingFromSlot;
+    if (!s_isDragInCurrentScope(rCtx))
+        return false;
+    if (rCtx.currentHoveredSlot != 0)
+        return false;  // a target slot is hovered → that's QueryNewLink territory
+    if (apoFromSlotId)
+        *apoFromSlotId = rCtx.draggingFromSlot;
     return true;
 }
 
 IMNODAL_API bool AcceptNewNodeFromSlot(ImU32 aColor) {
     Context& rCtx = s_getCtx();
-    if (!s_isDragInCurrentScope(rCtx)) return false;
-    if (rCtx.currentHoveredSlot != 0) return false;
+    if (!s_isDragInCurrentScope(rCtx))
+        return false;
+    if (rCtx.currentHoveredSlot != 0)
+        return false;
     rCtx.connNewNodeAcceptedThisFrame = true;
     rCtx.connAcceptColor = (aColor != 0) ? aColor : rCtx.style.Colors[ImNodalCol_LinkPreviewAccept];
     rCtx.connRejectReason = nullptr;
@@ -2541,8 +2582,7 @@ IMNODAL_API void EndConnectionCreate() {
                     const ImRect& nr = nIt->second.lastScreenRect;
                     if (nr.Min.x < nr.Max.x) {
                         const ImVec2 mp = ImGui::GetIO().MousePos;
-                        insideSourceNode = (mp.x >= nr.Min.x && mp.x <= nr.Max.x &&
-                                            mp.y >= nr.Min.y && mp.y <= nr.Max.y);
+                        insideSourceNode = (mp.x >= nr.Min.x && mp.x <= nr.Max.x && mp.y >= nr.Min.y && mp.y <= nr.Max.y);
                     }
                 }
             }
@@ -2550,8 +2590,7 @@ IMNODAL_API void EndConnectionCreate() {
             // (typical of "drag from one slot to another inside the same node",
             // unusual but possible) — that path uses the slot's known position
             // rather than the mouse, and the preview is informative there.
-            const bool hoveringOtherSlot = (rCtx.currentHoveredSlot != 0 &&
-                                            rCtx.currentHoveredSlot != rCtx.draggingFromSlot);
+            const bool hoveringOtherSlot = (rCtx.currentHoveredSlot != 0 && rCtx.currentHoveredSlot != rCtx.draggingFromSlot);
 
             if (!insideSourceNode || hoveringOtherSlot) {
                 ImVec2 toPos;
@@ -2604,18 +2643,21 @@ IMNODAL_API void EndConnectionCreate() {
 
 IMNODAL_API int GetSelectedObjectCount() {
     Context& rCtx = s_getCtx();
-    if (!rCtx.graphActive) return 0;
+    if (!rCtx.graphActive)
+        return 0;
     GraphState& g = rCtx.graphs[rCtx.currentGraphId];
     return (int)(g.selectedNodes.size() + g.selectedLinks.size());
 }
 
 IMNODAL_API int GetSelectedNodes(Id* apoBuffer, int aCapacity) {
     Context& rCtx = s_getCtx();
-    if (!rCtx.graphActive || apoBuffer == nullptr || aCapacity <= 0) return 0;
+    if (!rCtx.graphActive || apoBuffer == nullptr || aCapacity <= 0)
+        return 0;
     GraphState& g = rCtx.graphs[rCtx.currentGraphId];
     int n = 0;
     for (Id id : g.selectedNodes) {
-        if (n >= aCapacity) break;
+        if (n >= aCapacity)
+            break;
         apoBuffer[n++] = id;
     }
     return n;
@@ -2623,11 +2665,13 @@ IMNODAL_API int GetSelectedNodes(Id* apoBuffer, int aCapacity) {
 
 IMNODAL_API int GetSelectedLinks(Id* apoBuffer, int aCapacity) {
     Context& rCtx = s_getCtx();
-    if (!rCtx.graphActive || apoBuffer == nullptr || aCapacity <= 0) return 0;
+    if (!rCtx.graphActive || apoBuffer == nullptr || aCapacity <= 0)
+        return 0;
     GraphState& g = rCtx.graphs[rCtx.currentGraphId];
     int n = 0;
     for (Id id : g.selectedLinks) {
-        if (n >= aCapacity) break;
+        if (n >= aCapacity)
+            break;
         apoBuffer[n++] = id;
     }
     return n;
@@ -2635,7 +2679,8 @@ IMNODAL_API int GetSelectedLinks(Id* apoBuffer, int aCapacity) {
 
 IMNODAL_API bool HasSelectionChanged() {
     Context& rCtx = s_getCtx();
-    if (!rCtx.graphActive) return false;
+    if (!rCtx.graphActive)
+        return false;
     return rCtx.graphs[rCtx.currentGraphId].selectionChangedThisFrame;
 }
 
@@ -2644,7 +2689,8 @@ IMNODAL_API bool HasSelectionChanged() {
 IMNODAL_API void AddToSelection(Id aId) {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.graphActive && "AddToSelection must be called inside BeginGraph/EndGraph");
-    if (aId == 0) return;
+    if (aId == 0)
+        return;
     GraphState& g = rCtx.graphs[rCtx.currentGraphId];
     if (rCtx.nodes.count(aId) > 0) {
         if (g.selectedNodes.insert(aId).second) {
@@ -2662,7 +2708,8 @@ IMNODAL_API void AddToSelection(Id aId) {
 IMNODAL_API void RemoveFromSelection(Id aId) {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.graphActive && "RemoveFromSelection must be called inside BeginGraph/EndGraph");
-    if (aId == 0) return;
+    if (aId == 0)
+        return;
     GraphState& g = rCtx.graphs[rCtx.currentGraphId];
     if (g.selectedNodes.erase(aId) != 0) {
         if (g.lastSelectedNode == aId) {
@@ -2687,29 +2734,41 @@ IMNODAL_API void ClearSelection() {
 // =====================================================================
 // Direct hover queries
 // =====================================================================
-IMNODAL_API Id GetHoveredSlot() { return s_getCtx().currentHoveredSlot; }
-IMNODAL_API Id GetHoveredNode() { return s_getCtx().currentHoveredNode; }
-IMNODAL_API Id GetHoveredLink() { return s_getCtx().currentHoveredLink; }
+IMNODAL_API Id GetHoveredSlot() {
+    return s_getCtx().currentHoveredSlot;
+}
+IMNODAL_API Id GetHoveredNode() {
+    return s_getCtx().currentHoveredNode;
+}
+IMNODAL_API Id GetHoveredLink() {
+    return s_getCtx().currentHoveredLink;
+}
 
 // =====================================================================
 // Context-menu requests
 // =====================================================================
 IMNODAL_API bool IsNodeContextMenuRequested(Id* apoNodeId) {
     Context& rCtx = s_getCtx();
-    if (rCtx.ctxMenuNodeId == 0) return false;
-    if (apoNodeId) *apoNodeId = rCtx.ctxMenuNodeId;
+    if (rCtx.ctxMenuNodeId == 0)
+        return false;
+    if (apoNodeId)
+        *apoNodeId = rCtx.ctxMenuNodeId;
     return true;
 }
 IMNODAL_API bool IsSlotContextMenuRequested(Id* apoSlotId) {
     Context& rCtx = s_getCtx();
-    if (rCtx.ctxMenuSlotId == 0) return false;
-    if (apoSlotId) *apoSlotId = rCtx.ctxMenuSlotId;
+    if (rCtx.ctxMenuSlotId == 0)
+        return false;
+    if (apoSlotId)
+        *apoSlotId = rCtx.ctxMenuSlotId;
     return true;
 }
 IMNODAL_API bool IsLinkContextMenuRequested(Id* apoLinkId) {
     Context& rCtx = s_getCtx();
-    if (rCtx.ctxMenuLinkId == 0) return false;
-    if (apoLinkId) *apoLinkId = rCtx.ctxMenuLinkId;
+    if (rCtx.ctxMenuLinkId == 0)
+        return false;
+    if (apoLinkId)
+        *apoLinkId = rCtx.ctxMenuLinkId;
     return true;
 }
 
@@ -2730,21 +2789,21 @@ IMNODAL_API bool BeginDelete() {
     rCtx.currentDeleteCandidate = 0;
     rCtx.currentDeleteKind = 0;
 
-    const bool ctrl          = ImGui::IsKeyDown(ImGuiMod_Ctrl) || ImGui::IsKeyDown(ImGuiMod_Super);
-    const bool ctrlX         = ctrl && ImGui::IsKeyPressed(ImGuiKey_X, false);
+    const bool ctrl = ImGui::IsKeyDown(ImGuiMod_Ctrl) || ImGui::IsKeyDown(ImGuiMod_Super);
+    const bool ctrlX = ctrl && ImGui::IsKeyPressed(ImGuiKey_X, false);
     // repeat=false : on ne veut PAS que delete fire 10x si l'utilisateur tient
     // la touche enfoncee. Une seule deletion par appui.
-    const bool deletePressed = ImGui::IsKeyPressed(ImGuiKey_Delete, false) ||
-                               ImGui::IsKeyPressed(ImGuiKey_Backspace, false) ||
-                               ctrlX;
+    const bool deletePressed = ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false) || ctrlX;
     const bool canvasHovered = rCtx.hovered;  // computed by EndCanvas of last frame
     // WantCaptureKeyboard : un widget ImGui (text input ailleurs, etc.) capte
     // le clavier. Backspace tape la-bas ne doit pas faire deleter notre
     // selection canvas — meme si la souris survole le canvas par hasard.
     const bool kbCaptured = ImGui::GetIO().WantCaptureKeyboard;
     if (deletePressed && canvasHovered && !kbCaptured) {
-        for (Id id : g.selectedLinks) rCtx.pendingDeleteLinks.push_back(id);
-        for (Id id : g.selectedNodes) rCtx.pendingDeleteNodes.push_back(id);
+        for (Id id : g.selectedLinks)
+            rCtx.pendingDeleteLinks.push_back(id);
+        for (Id id : g.selectedNodes)
+            rCtx.pendingDeleteNodes.push_back(id);
     }
 
     if (rCtx.pendingDeleteLinks.empty() && rCtx.pendingDeleteNodes.empty()) {
@@ -2756,7 +2815,8 @@ IMNODAL_API bool BeginDelete() {
 
 IMNODAL_API bool QueryDeletedLink(Id* apoLinkId) {
     Context& rCtx = s_getCtx();
-    if (!rCtx.deleteScopeOpen) return false;
+    if (!rCtx.deleteScopeOpen)
+        return false;
     if (rCtx.pendingDeleteLinks.empty()) {
         rCtx.currentDeleteCandidate = 0;
         rCtx.currentDeleteKind = 0;
@@ -2764,13 +2824,15 @@ IMNODAL_API bool QueryDeletedLink(Id* apoLinkId) {
     }
     rCtx.currentDeleteCandidate = rCtx.pendingDeleteLinks.front();
     rCtx.currentDeleteKind = 1;
-    if (apoLinkId) *apoLinkId = rCtx.currentDeleteCandidate;
+    if (apoLinkId)
+        *apoLinkId = rCtx.currentDeleteCandidate;
     return true;
 }
 
 IMNODAL_API bool QueryDeletedNode(Id* apoNodeId) {
     Context& rCtx = s_getCtx();
-    if (!rCtx.deleteScopeOpen) return false;
+    if (!rCtx.deleteScopeOpen)
+        return false;
     if (rCtx.pendingDeleteNodes.empty()) {
         rCtx.currentDeleteCandidate = 0;
         rCtx.currentDeleteKind = 0;
@@ -2778,13 +2840,15 @@ IMNODAL_API bool QueryDeletedNode(Id* apoNodeId) {
     }
     rCtx.currentDeleteCandidate = rCtx.pendingDeleteNodes.front();
     rCtx.currentDeleteKind = 2;
-    if (apoNodeId) *apoNodeId = rCtx.currentDeleteCandidate;
+    if (apoNodeId)
+        *apoNodeId = rCtx.currentDeleteCandidate;
     return true;
 }
 
 IMNODAL_API bool AcceptDelete() {
     Context& rCtx = s_getCtx();
-    if (!rCtx.deleteScopeOpen || rCtx.currentDeleteCandidate == 0) return false;
+    if (!rCtx.deleteScopeOpen || rCtx.currentDeleteCandidate == 0)
+        return false;
     if (rCtx.currentDeleteKind == 1) {
         rCtx.acceptedDeleteLinks.push_back(rCtx.currentDeleteCandidate);
         rCtx.pendingDeleteLinks.pop_front();
@@ -2799,7 +2863,8 @@ IMNODAL_API bool AcceptDelete() {
 
 IMNODAL_API void RejectDelete() {
     Context& rCtx = s_getCtx();
-    if (!rCtx.deleteScopeOpen || rCtx.currentDeleteCandidate == 0) return;
+    if (!rCtx.deleteScopeOpen || rCtx.currentDeleteCandidate == 0)
+        return;
     if (rCtx.currentDeleteKind == 1) {
         rCtx.pendingDeleteLinks.pop_front();
     } else if (rCtx.currentDeleteKind == 2) {
@@ -2816,8 +2881,10 @@ IMNODAL_API void EndDelete() {
     // next frame, but we want the selection state coherent immediately.
     if (rCtx.graphActive) {
         GraphState& g = rCtx.graphs[rCtx.currentGraphId];
-        for (Id id : rCtx.acceptedDeleteLinks) g.selectedLinks.erase(id);
-        for (Id id : rCtx.acceptedDeleteNodes) g.selectedNodes.erase(id);
+        for (Id id : rCtx.acceptedDeleteLinks)
+            g.selectedLinks.erase(id);
+        for (Id id : rCtx.acceptedDeleteNodes)
+            g.selectedNodes.erase(id);
         if (g.lastSelectedNode != 0 && g.selectedNodes.count(g.lastSelectedNode) == 0) {
             g.lastSelectedNode = g.selectedNodes.empty() ? 0 : *g.selectedNodes.begin();
         }
@@ -2837,7 +2904,7 @@ IMNODAL_API void EndDelete() {
     }
     for (Id id : rCtx.acceptedDeleteNodes) {
         // Erase all slots whose parent is this node.
-        for (auto it = rCtx.slots.begin(); it != rCtx.slots.end(); ) {
+        for (auto it = rCtx.slots.begin(); it != rCtx.slots.end();) {
             if (it->second.parentNode == id) {
                 it = rCtx.slots.erase(it);
             } else {
@@ -2866,12 +2933,15 @@ namespace {
 static void s_captureActionContext(Context& arCtx) {
     arCtx.actionContextNodes.clear();
     arCtx.actionContextLinks.clear();
-    if (!arCtx.graphActive) return;
+    if (!arCtx.graphActive)
+        return;
     GraphState& g = arCtx.graphs[arCtx.currentGraphId];
     arCtx.actionContextNodes.reserve(g.selectedNodes.size());
     arCtx.actionContextLinks.reserve(g.selectedLinks.size());
-    for (Id id : g.selectedNodes) arCtx.actionContextNodes.push_back(id);
-    for (Id id : g.selectedLinks) arCtx.actionContextLinks.push_back(id);
+    for (Id id : g.selectedNodes)
+        arCtx.actionContextNodes.push_back(id);
+    for (Id id : g.selectedLinks)
+        arCtx.actionContextLinks.push_back(id);
 }
 
 }  // namespace
@@ -2883,22 +2953,24 @@ IMNODAL_API bool BeginShortcut() {
 
     // Read shortcut keys only when the canvas is hovered — otherwise typing
     // Ctrl+C in a text input elsewhere would fire the graph's copy.
-    if (!rCtx.hovered) return false;
+    if (!rCtx.hovered)
+        return false;
 
     const bool ctrl = ImGui::IsKeyDown(ImGuiMod_Ctrl) || ImGui::IsKeyDown(ImGuiMod_Super);
-    if (!ctrl) return false;
+    if (!ctrl)
+        return false;
 
     // Detect each shortcut once per press.
-    rCtx.shortcutCopyFired      = ImGui::IsKeyPressed(ImGuiKey_C, false);
-    rCtx.shortcutPasteFired     = ImGui::IsKeyPressed(ImGuiKey_V, false);
-    rCtx.shortcutCutFired       = ImGui::IsKeyPressed(ImGuiKey_X, false);
+    rCtx.shortcutCopyFired = ImGui::IsKeyPressed(ImGuiKey_C, false);
+    rCtx.shortcutPasteFired = ImGui::IsKeyPressed(ImGuiKey_V, false);
+    rCtx.shortcutCutFired = ImGui::IsKeyPressed(ImGuiKey_X, false);
     rCtx.shortcutDuplicateFired = ImGui::IsKeyPressed(ImGuiKey_D, false);
     rCtx.shortcutSelectAllFired = ImGui::IsKeyPressed(ImGuiKey_A, false);
 
-    const bool any = rCtx.shortcutCopyFired || rCtx.shortcutPasteFired ||
-                     rCtx.shortcutCutFired  || rCtx.shortcutDuplicateFired ||
-                     rCtx.shortcutSelectAllFired;
-    if (!any) return false;
+    const bool any =
+        rCtx.shortcutCopyFired || rCtx.shortcutPasteFired || rCtx.shortcutCutFired || rCtx.shortcutDuplicateFired || rCtx.shortcutSelectAllFired;
+    if (!any)
+        return false;
 
     // Select-all is a host-side operation but we can do it ourselves: insert
     // every node and every link of the current graph into the selection.
@@ -2906,10 +2978,12 @@ IMNODAL_API bool BeginShortcut() {
         GraphState& g = rCtx.graphs[rCtx.currentGraphId];
         const size_t before = g.selectedNodes.size() + g.selectedLinks.size();
         for (const auto& kv : rCtx.nodes) {
-            if (kv.second.graphId == g.id) g.selectedNodes.insert(kv.first);
+            if (kv.second.graphId == g.id)
+                g.selectedNodes.insert(kv.first);
         }
         for (const auto& kv : rCtx.links) {
-            if (kv.second.graphId == g.id) g.selectedLinks.insert(kv.first);
+            if (kv.second.graphId == g.id)
+                g.selectedLinks.insert(kv.first);
         }
         if (g.selectedNodes.size() + g.selectedLinks.size() != before) {
             g.selectionChangedThisFrame = true;
@@ -2921,11 +2995,21 @@ IMNODAL_API bool BeginShortcut() {
     return true;
 }
 
-IMNODAL_API bool AcceptCopy()      { return s_getCtx().shortcutCopyFired; }
-IMNODAL_API bool AcceptPaste()     { return s_getCtx().shortcutPasteFired; }
-IMNODAL_API bool AcceptCut()       { return s_getCtx().shortcutCutFired; }
-IMNODAL_API bool AcceptDuplicate() { return s_getCtx().shortcutDuplicateFired; }
-IMNODAL_API bool AcceptSelectAll() { return s_getCtx().shortcutSelectAllFired; }
+IMNODAL_API bool AcceptCopy() {
+    return s_getCtx().shortcutCopyFired;
+}
+IMNODAL_API bool AcceptPaste() {
+    return s_getCtx().shortcutPasteFired;
+}
+IMNODAL_API bool AcceptCut() {
+    return s_getCtx().shortcutCutFired;
+}
+IMNODAL_API bool AcceptDuplicate() {
+    return s_getCtx().shortcutDuplicateFired;
+}
+IMNODAL_API bool AcceptSelectAll() {
+    return s_getCtx().shortcutSelectAllFired;
+}
 
 IMNODAL_API void EndShortcut() {
     Context& rCtx = s_getCtx();
@@ -2937,17 +3021,21 @@ IMNODAL_API void EndShortcut() {
 
 IMNODAL_API int GetActionContextNodes(Id* apoBuffer, int aCapacity) {
     Context& rCtx = s_getCtx();
-    if (apoBuffer == nullptr || aCapacity <= 0) return 0;
+    if (apoBuffer == nullptr || aCapacity <= 0)
+        return 0;
     const int n = ImMin((int)rCtx.actionContextNodes.size(), aCapacity);
-    for (int i = 0; i < n; ++i) apoBuffer[i] = rCtx.actionContextNodes[i];
+    for (int i = 0; i < n; ++i)
+        apoBuffer[i] = rCtx.actionContextNodes[i];
     return n;
 }
 
 IMNODAL_API int GetActionContextLinks(Id* apoBuffer, int aCapacity) {
     Context& rCtx = s_getCtx();
-    if (apoBuffer == nullptr || aCapacity <= 0) return 0;
+    if (apoBuffer == nullptr || aCapacity <= 0)
+        return 0;
     const int n = ImMin((int)rCtx.actionContextLinks.size(), aCapacity);
-    for (int i = 0; i < n; ++i) apoBuffer[i] = rCtx.actionContextLinks[i];
+    for (int i = 0; i < n; ++i)
+        apoBuffer[i] = rCtx.actionContextLinks[i];
     return n;
 }
 
@@ -2962,12 +3050,14 @@ IMNODAL_API int GetActionContextLinks(Id* apoBuffer, int aCapacity) {
 IMNODAL_API void FlowLink(Id aLinkId, float aSpeed, ImU32 aColor) {
     Context& rCtx = s_getCtx();
     auto it = rCtx.links.find(aLinkId);
-    if (it == rCtx.links.end()) return;
+    if (it == rCtx.links.end())
+        return;
     LinkState& rLink = it->second;
-    if (!rLink.bezierCached) return;  // Link() wasn't called this frame
+    if (!rLink.bezierCached)
+        return;  // Link() wasn't called this frame
 
     constexpr int kDotCount = 5;
-    constexpr int kSamples  = 32;
+    constexpr int kSamples = 32;
 
     // Phase progresses every frame, wraps over [0, 1).
     const float t = static_cast<float>(ImGui::GetTime());
@@ -2977,27 +3067,26 @@ IMNODAL_API void FlowLink(Id aLinkId, float aSpeed, ImU32 aColor) {
     const float chordLen = std::sqrt(chord.x * chord.x + chord.y * chord.y) + 1e-3f;
     const float phase = std::fmod(t * aSpeed * canvasScale / chordLen, 1.0f);
 
-    const ImU32 color = (aColor != 0) ? aColor
-                       : rCtx.style.Colors[ImNodalCol_FlowDot];
+    const ImU32 color = (aColor != 0) ? aColor : rCtx.style.Colors[ImNodalCol_FlowDot];
     const float dotRadius = ImMax(rLink.thickness * 0.9f, 2.0f);
 
     auto* const pDrawList = rCtx.graphActive ? rCtx.drawList : ImGui::GetWindowDrawList();
-    if (rCtx.graphActive) s_setChannel(rCtx, GC_Links);
+    if (rCtx.graphActive)
+        s_setChannel(rCtx, GC_Links);
 
     for (int i = 0; i < kDotCount; ++i) {
         float u = phase + (float)i / (float)kDotCount;
-        if (u >= 1.0f) u -= 1.0f;
+        if (u >= 1.0f)
+            u -= 1.0f;
         const float v = 1.0f - u;
-        const ImVec2 pt =
-            rLink.cachedFromPos * (v * v * v) +
-            rLink.cachedP1     * (3.0f * v * v * u) +
-            rLink.cachedP2     * (3.0f * v * u * u) +
-            rLink.cachedToPos  * (u * u * u);
+        const ImVec2 pt = rLink.cachedFromPos * (v * v * v) + rLink.cachedP1 * (3.0f * v * v * u) + rLink.cachedP2 * (3.0f * v * u * u) +
+            rLink.cachedToPos * (u * u * u);
         pDrawList->AddCircleFilled(pt, dotRadius, color);
         (void)kSamples;
     }
 
-    if (rCtx.graphActive) s_setChannel(rCtx, GC_Content);
+    if (rCtx.graphActive)
+        s_setChannel(rCtx, GC_Content);
 }
 
 // =====================================================================
@@ -3012,16 +3101,20 @@ IMNODAL_API void FlowLink(Id aLinkId, float aSpeed, ImU32 aColor) {
 
 IMNODAL_API ImDrawList* GetNodeBackgroundDrawList(Id aNodeId) {
     Context& rCtx = s_getCtx();
-    if (!rCtx.graphActive) return ImGui::GetWindowDrawList();
-    if (rCtx.nodes.count(aNodeId) == 0) return rCtx.drawList;
+    if (!rCtx.graphActive)
+        return ImGui::GetWindowDrawList();
+    if (rCtx.nodes.count(aNodeId) == 0)
+        return rCtx.drawList;
     s_setChannel(rCtx, GC_UserBg);
     return rCtx.drawList;
 }
 
 IMNODAL_API ImDrawList* GetNodeForegroundDrawList(Id aNodeId) {
     Context& rCtx = s_getCtx();
-    if (!rCtx.graphActive) return ImGui::GetWindowDrawList();
-    if (rCtx.nodes.count(aNodeId) == 0) return rCtx.drawList;
+    if (!rCtx.graphActive)
+        return ImGui::GetWindowDrawList();
+    if (rCtx.nodes.count(aNodeId) == 0)
+        return rCtx.drawList;
     s_setChannel(rCtx, GC_UserFg);
     return rCtx.drawList;
 }
@@ -3029,37 +3122,30 @@ IMNODAL_API ImDrawList* GetNodeForegroundDrawList(Id aNodeId) {
 IMNODAL_API ImRect GetNodeRect(Id aNodeId) {
     Context& rCtx = s_getCtx();
     auto it = rCtx.nodes.find(aNodeId);
-    if (it == rCtx.nodes.end()) return ImRect();
+    if (it == rCtx.nodes.end())
+        return ImRect();
     const ImRect& r = it->second.lastScreenRect;
     // The cached rect is in LOCAL space (captured during EndNode while inside
     // BeginCanvas local-space scope). When the caller is outside that scope
     // — i.e. canvas inactive or suspended — translate to screen so the rect
     // is directly usable for ImGui screen-space draws / popups.
     const bool inLocal = rCtx.active && rCtx.suspendCounter == 0;
-    if (inLocal) return r;
+    if (inLocal)
+        return r;
     return ImRect(s_canvasToScreen(rCtx, r.Min), s_canvasToScreen(rCtx, r.Max));
 }
 
 // =====================================================================
 // Slot dot pivot
 // =====================================================================
-IMNODAL_API void SlotDotPivotAlignment(const ImVec2& aAlignment) {
-    s_getCtx().slotPivotAlignment = aAlignment;
+IMNODAL_API void SlotAlignment(const ImVec2& aAlignment) {
+    s_getCtx().slotAlignment = aAlignment;
 }
-IMNODAL_API void SlotDotPivotOffset(const ImVec2& aOffsetPx) {
+IMNODAL_API void SlotSize(const ImVec2& aSizePx) {
+    s_getCtx().slotSize = aSizePx;
+}
+IMNODAL_API void SlotPivotOffset(const ImVec2& aOffsetPx) {
     s_getCtx().slotPivotOffset = aOffsetPx;
-}
-IMNODAL_API void SlotDotAnchorEdge(SlotDotEdge aEdge) {
-    Context& rCtx = s_getCtx();
-    switch (aEdge) {
-    case SlotDotEdge_Left:   rCtx.slotPivotAlignment = ImVec2(0.0f, 0.5f); break;
-    case SlotDotEdge_Right:  rCtx.slotPivotAlignment = ImVec2(1.0f, 0.5f); break;
-    case SlotDotEdge_Top:    rCtx.slotPivotAlignment = ImVec2(0.5f, 0.0f); break;
-    case SlotDotEdge_Bottom: rCtx.slotPivotAlignment = ImVec2(0.5f, 1.0f); break;
-    case SlotDotEdge_Center: rCtx.slotPivotAlignment = ImVec2(0.5f, 0.5f); break;
-    case SlotDotEdge_Auto:
-    default:                 rCtx.slotPivotAlignment = ImVec2(-1.0f, -1.0f); break;
-    }
 }
 
 // =====================================================================
@@ -3070,14 +3156,15 @@ namespace {
 
 // Build the canvas-space bbox of a set of node ids. Returns false if no node
 // in the set has a known size yet (e.g. before the first frame ran).
-static bool s_collectNodeBBox(const Context& arCtx, const std::unordered_set<Id>& arSet,
-                              ImVec2& aroMin, ImVec2& aroMax) {
+static bool s_collectNodeBBox(const Context& arCtx, const std::unordered_set<Id>& arSet, ImVec2& aroMin, ImVec2& aroMax) {
     bool any = false;
     for (Id id : arSet) {
         auto it = arCtx.nodes.find(id);
-        if (it == arCtx.nodes.end()) continue;
+        if (it == arCtx.nodes.end())
+            continue;
         const NodeState& n = it->second;
-        if (n.size.x <= 0.0f || n.size.y <= 0.0f) continue;
+        if (n.size.x <= 0.0f || n.size.y <= 0.0f)
+            continue;
         const ImVec2 lo = n.pos;
         const ImVec2 hi = n.pos + n.size;
         if (!any) {
@@ -3107,9 +3194,11 @@ static bool s_collectAllNodesBBox(const Context& arCtx, ImVec2& aroMin, ImVec2& 
     }
     bool any = false;
     for (const auto& kv : arCtx.nodes) {
-        if (!drawnLastFrame.empty() && drawnLastFrame.count(kv.first) == 0) continue;
+        if (!drawnLastFrame.empty() && drawnLastFrame.count(kv.first) == 0)
+            continue;
         const NodeState& n = kv.second;
-        if (n.size.x <= 0.0f || n.size.y <= 0.0f) continue;
+        if (n.size.x <= 0.0f || n.size.y <= 0.0f)
+            continue;
         const ImVec2 lo = n.pos;
         const ImVec2 hi = n.pos + n.size;
         if (!any) {
@@ -3131,7 +3220,8 @@ static bool s_collectAllNodesBBox(const Context& arCtx, ImVec2& aroMin, ImVec2& 
 IMNODAL_API void NavigateToContent(bool aZoomToFit, float aMarginRatio) {
     Context& rCtx = s_getCtx();
     ImVec2 lo, hi;
-    if (!s_collectAllNodesBBox(rCtx, lo, hi)) return;
+    if (!s_collectAllNodesBBox(rCtx, lo, hi))
+        return;
     if (aZoomToFit) {
         ZoomCanvasToRect(lo, hi, aMarginRatio);
     } else {
@@ -3142,7 +3232,8 @@ IMNODAL_API void NavigateToContent(bool aZoomToFit, float aMarginRatio) {
 
 IMNODAL_API void NavigateToSelection(bool aZoomToFit, float aMarginRatio) {
     Context& rCtx = s_getCtx();
-    if (!rCtx.graphActive) return;
+    if (!rCtx.graphActive)
+        return;
     GraphState& g = rCtx.graphs[rCtx.currentGraphId];
     if (g.selectedNodes.empty()) {
         // Empty selection → fall back to "navigate to content".
@@ -3150,7 +3241,8 @@ IMNODAL_API void NavigateToSelection(bool aZoomToFit, float aMarginRatio) {
         return;
     }
     ImVec2 lo, hi;
-    if (!s_collectNodeBBox(rCtx, g.selectedNodes, lo, hi)) return;
+    if (!s_collectNodeBBox(rCtx, g.selectedNodes, lo, hi))
+        return;
     if (aZoomToFit) {
         ZoomCanvasToRect(lo, hi, aMarginRatio);
     } else {
@@ -3162,71 +3254,48 @@ IMNODAL_API void NavigateToSelection(bool aZoomToFit, float aMarginRatio) {
 // =====================================================================
 // Reroute node (M2)
 // =====================================================================
-// Minimal 1-in/1-out pass-through node rendered as a single dot. Draggable;
-// clicking on either slot starts a new connection drag.
+// Minimal 1-in/1-out pass-through node. Capture-only : ImNodal sets up the
+// node geometry, the InOut slot pivot at its center and a circular hit
+// area of `aHitRadius` around it. The host paints the visible dot/ring
+// AFTER EndRerouteNode using GetSlotScreenPos / IsNodeSelected.
 
-IMNODAL_API bool BeginRerouteNode(Id aNodeId, Id aSlotId, ImVec2* apPos, const NodeSettings& arSettings, ImU32 aDotColor) {
-    // Reroute UE-style : body/header transparents, dot visible, frame
-    // circulaire legerement transparente en permanence (RerouteBorder du
-    // style) qui passe au jaune sur selection (RerouteBorderSelected).
-    // L'override des couleurs node se fait par PushStyleColor, qu'on
-    // matche avec un PopStyleColor a EndRerouteNode.
+IMNODAL_API bool BeginRerouteNode(Id aNodeId, Id aSlotId, ImVec2* apPos, const NodeSettings& arSettings, float aHitRadius) {
     Context& rCtx = s_getCtx();
-    PushStyleColor(ImNodalCol_NodeBody,   IM_COL32(0, 0, 0, 0));
-    PushStyleColor(ImNodalCol_NodeHeader, IM_COL32(0, 0, 0, 0));
-    // Si le host a passe une couleur de wire, on l'utilise pour le dot
-    // (les 3 etats : default, connecte, hovered) — le dot prend visuellement
-    // la couleur du wire qui passe par le reroute.
-    int slotColorPushes = 0;
-    if (aDotColor != 0) {
-        PushStyleColor(ImNodalCol_SlotDot,          aDotColor);
-        PushStyleColor(ImNodalCol_SlotDotConnected, aDotColor);
-        PushStyleColor(ImNodalCol_SlotDotHovered,   IM_COL32(255, 255, 255, 255));
-        slotColorPushes = 3;
-    }
-
     NodeSettings reSettings = arSettings;
     reSettings.drawHoverHandle = false;
     if (!BeginNode(aNodeId, apPos, reSettings)) {
-        PopStyleColor(2 + slotColorPushes);
         return false;
     }
 
-    // Marque le node comme reroute pour que EndNode dessine la frame de
-    // selection en CERCLE (au lieu du rect par defaut), pour qu'EndGraph
-    // dessine le halo de hover du slot en cercle, et pour qu'EndNode utilise
-    // ImNodalCol_RerouteBorder/RerouteBorderSelected au lieu des Border
-    // standards.
+    // Mark the node as a reroute so EndNode skips the body/border draw
+    // (the host paints those) and EndGraph skips the rectangular hover
+    // halo on the slot.
     {
         auto it = rCtx.nodes.find(aNodeId);
         if (it != rCtx.nodes.end()) {
             it->second.isReroute = true;
             it->second.rerouteSlotId = aSlotId;
+            it->second.rerouteHitRadius = (aHitRadius > 0.0f) ? aHitRadius : rCtx.style.SlotDotRadius;
         }
     }
-    // On stocke le nombre de push pour les rejouer en pop a EndRerouteNode.
-    rCtx.nodes[aNodeId].rerouteStyleColorPushes = 2 + slotColorPushes;
 
     SlotSettings dotSettings{};
-
-    // Leading top spacer so the hover handle has visual room above the dot.
-    ImGui::Dummy(ImVec2(18.0f, 4.0f));
-    BeginSlot(aSlotId, SlotRole_InOut, "", dotSettings);
-    ImGui::Dummy(ImVec2(14.0f, 8.0f));
+    // Empty Dummy of (2r, 2r) sized on aHitRadius so the slot group rect
+    // is centered around what the host will paint as the dot. The slot
+    // pivot ends up at the center thanks to SlotRole_InOut.
+    const float r = (aHitRadius > 0.0f) ? aHitRadius : rCtx.style.SlotDotRadius;
+    const float d = r * 2.0f;
+    BeginSlot(aSlotId, SlotRole_InOut, dotSettings);
+    ImGui::Dummy(ImVec2(d, d));
     EndSlot();
-    // Trailing bottom spacer so the drag zone extends below the dot too.
-    ImGui::Dummy(ImVec2(18.0f, 2.0f));
 
     return true;
 }
 
 IMNODAL_API void EndRerouteNode() {
-    Context& rCtx = s_getCtx();
-    const int popCount = (rCtx.currentNodeId != 0)
-        ? rCtx.nodes[rCtx.currentNodeId].rerouteStyleColorPushes
-        : 0;
     EndNode();
-    PopStyleColor(popCount);
 }
+
+// ShowDemoWindow lives in ImNodalDemo.cpp.
 
 }  // namespace ImNodal
