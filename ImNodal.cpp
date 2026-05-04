@@ -1155,6 +1155,11 @@ IMNODAL_API void SetCanvasView(const ImVec2& aOrigin, float aScale) {
         rCtx.scale = aScale;
         rCtx.invScale = (aScale != 0.0f) ? 1.0f / aScale : 0.0f;
     }
+    // Mark the view as initialized so the next BeginCanvas doesn't auto-
+    // center back to (widgetSize/2, scale=1) and overwrite this value —
+    // typically called by hosts that restore the view from saved state
+    // (XML load, undo, etc.) BEFORE the first BeginCanvas of the frame.
+    rCtx.viewInitialized = true;
     if (reenter) {
         s_enterLocalSpace(rCtx);
     }
