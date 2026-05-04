@@ -1877,8 +1877,15 @@ static bool s_beginBodyColumn(Context& rCtx, Context::Section aSec, const char* 
 static void s_endBodyColumn(Context& rCtx, Context::Section aSec) {
     IM_ASSERT(rCtx.currentSection == aSec && "EndInputs/Outputs/Center without matching Begin");
     ImGui::EndGroup();
+    // Only flag the column as "opened" when something was actually emitted.
+    // Otherwise the next column would SameLine after an empty group and add
+    // NodeColumnSpacing px of dead space — visible as a wide empty area on
+    // nodes that only have outputs (or only inputs).
+    const ImVec2 itemSize = ImGui::GetItemRectSize();
     ImGui::PopID();
-    rCtx.nodes[rCtx.currentNodeId].bodyColumnOpened = true;
+    if (itemSize.x > 0.0f) {
+        rCtx.nodes[rCtx.currentNodeId].bodyColumnOpened = true;
+    }
     rCtx.currentSection = Context::Section_None;
 }
 
