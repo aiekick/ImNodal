@@ -471,6 +471,50 @@ IMNODAL_API bool   IsNodeDragging(Id aNodeId);
 
 IMNODAL_API void Link(Id aLinkId, Id aFromSlotId, Id aToSlotId, ImU32 aColor = 0, float aThickness = 3.0f);
 
+// =====================================================================
+// Custom links — primitives bas niveau (dessin + hit-test combines)
+// =====================================================================
+// Workflow:
+//   if (ImNodal::BeginLink(linkId, fromSlot, toSlot, thickness, color)) {
+//       // n'importe quelle composition de:
+//       ImNodal::LinkBezierSegment(p0, p1, fromTan, toTan, segments);
+//       ImNodal::LinkLineSegment(p0, p1);
+//       ImNodal::LinkPolyline(points, count);
+//       ImNodal::EndLink();
+//   }
+// Toutes les coordonnees sont en SCREEN-SPACE (cf. GetSlotScreenPos).
+// Les primitives accumulent un polyline qui est dessine en une passe par
+// EndLink avec la couleur finale (base / hovered / selected). Le hit-test
+// d'un segment couvre un OBB de largeur max(thickness*2, 6/canvasScale).
+
+IMNODAL_API bool   BeginLink(Id aLinkId, Id aFromSlotId, Id aToSlotId, float aThickness = 0.0f, ImU32 aColor = 0);
+IMNODAL_API void   EndLink();
+
+// Geometrie du link courant, pre-resolue par BeginLink (gere le sentinel
+// InOut (0,0) -> tangente horizontale dynamique). (0,0) en dehors d'un
+// scope BeginLink/EndLink.
+IMNODAL_API ImVec2 GetLinkFromPos();
+IMNODAL_API ImVec2 GetLinkToPos();
+IMNODAL_API ImVec2 GetLinkFromTangent();   // unit vector pointing AWAY from from-slot
+IMNODAL_API ImVec2 GetLinkToTangent();     // unit vector pointing AWAY from to-slot
+
+// Primitive: une ligne droite. Hit-test = OBB de largeur
+// max(thickness*2, 6/canvasScale) le long du segment.
+IMNODAL_API void   LinkLineSegment(const ImVec2& aP0, const ImVec2& aP1);
+
+// Primitive: cubic Bezier sample en N segments, appelle LinkLineSegment N
+// fois. Tangentes = vecteurs unitaires pointant AWAY des endpoints.
+// aSegments=0 -> 24. Distance des points de controle = clamp(0.4*chord, 30, 200).
+IMNODAL_API void   LinkBezierSegment(const ImVec2& aP0, const ImVec2& aP1, const ImVec2& aFromTangent, const ImVec2& aToTangent, int aSegments = 0);
+
+// Primitive: polyline pre-calculee (Manhattan, orthogonal, custom shape).
+// Emet (aCount-1) appels a LinkLineSegment.
+IMNODAL_API void   LinkPolyline(const ImVec2* apPoints, int aCount);
+
+// Override optionnel du seuil de hit-test pour le link courant. A appeler
+// entre BeginLink et la premiere primitive.
+IMNODAL_API void   SetLinkHitThickness(float aPixelThreshold);
+
 // Per-link queries (valid after the matching Link() call in the same frame).
 IMNODAL_API bool   IsLinkHovered(Id aLinkId);
 IMNODAL_API bool   IsLinkClicked(Id aLinkId, int aButton = 0);

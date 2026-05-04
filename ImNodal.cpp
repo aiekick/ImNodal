@@ -127,12 +127,11 @@ struct LinkState {
     Id graphId{0};
     ImU32 color{0};
     float thickness{3.0f};
-    // Bezier sampled control points cached by Link() for FlowLink() to reuse.
-    ImVec2 cachedFromPos{};
-    ImVec2 cachedToPos{};
-    ImVec2 cachedP1{};
-    ImVec2 cachedP2{};
-    bool bezierCached{false};
+    // Polyline emitted this frame in screen-space (filled by primitives between
+    // BeginLink/EndLink, drawn in one pass at EndLink). Reused by FlowLink and
+    // box-select. Generic over the link shape (cubic bezier, Manhattan, custom).
+    std::vector<ImVec2> cachedPath;
+    bool pathCached{false};
     // Per-frame interaction state (computed by Link(), reset at NewFrame).
     bool hovered{false};
     bool clicked{false};
@@ -273,6 +272,24 @@ struct Context {
     Id draggingNodeId{0};
     ImVec2 dragStartNodePos{};
     ImVec2 dragStartMouseCanvas{};
+
+    // -----------------------------
+    // BeginLink / EndLink scope (custom-link primitives)
+    // -----------------------------
+    // Open between BeginLink and EndLink. Primitives (LinkLineSegment,
+    // LinkBezierSegment, LinkPolyline) push into the active LinkState's
+    // cachedPath and OR-accumulate currentLinkHovered. EndLink resolves the
+    // final color and emits a single AddPolyline.
+    Id currentLinkId{0};
+    ImU32 currentLinkBaseColor{0};
+    float currentLinkThickness{0.0f};
+    float currentLinkHitThreshold{0.0f};
+    bool currentLinkHovered{false};
+    ImVec2 currentLinkFromPos{};
+    ImVec2 currentLinkToPos{};
+    ImVec2 currentLinkFromTangent{};
+    ImVec2 currentLinkToTangent{};
+    ImDrawList* currentLinkDrawList{nullptr};
 
     // -----------------------------
     // Connection creation state machine (M2)
@@ -424,7 +441,8 @@ static void s_doNewFrame(Context& arCtx) {
         kv.second.clicked = false;
         kv.second.doubleClicked = false;
         kv.second.ctxMenuRequested = false;
-        kv.second.bezierCached = false;
+        kv.second.pathCached = false;
+        kv.second.cachedPath.clear();
     }
     for (auto& kv : arCtx.nodes) {
         kv.second.ctxMenuRequested = false;
@@ -1444,20 +1462,15 @@ static bool s_segmentIntersectsRect(const ImVec2& aA, const ImVec2& aB, const Im
     return tMin <= 1.0f && tMax >= 0.0f;
 }
 
-// Sample the cubic bezier into N chords and return true as soon as one
-// chord intersects the AABB. Catches all curve-vs-box overlaps including
-// when the curve only clips a corner of the box.
-static bool
-s_bezierIntersectsRect(const ImVec2& aP0, const ImVec2& aP1, const ImVec2& aP2, const ImVec2& aP3, const ImVec2& aMin, const ImVec2& aMax) {
-    constexpr int kSamples = 32;
-    ImVec2 prev = aP0;
-    for (int i = 1; i <= kSamples; ++i) {
-        const float t = (float)i / (float)kSamples;
-        const float u = 1.0f - t;
-        const ImVec2 pt = aP0 * (u * u * u) + aP1 * (3.0f * u * u * t) + aP2 * (3.0f * u * t * t) + aP3 * (t * t * t);
-        if (s_segmentIntersectsRect(prev, pt, aMin, aMax))
+// Walk a polyline (apPoints[0..aCount-1]) and return true as soon as any
+// segment overlaps the AABB. Works for cubic bezier samples, Manhattan
+// paths, and host-custom shapes alike — used by box-select on cachedPath.
+static bool s_pathIntersectsRect(const ImVec2* apPoints, int aCount, const ImVec2& aMin, const ImVec2& aMax) {
+    if (apPoints == nullptr || aCount < 2)
+        return false;
+    for (int i = 1; i < aCount; ++i) {
+        if (s_segmentIntersectsRect(apPoints[i - 1], apPoints[i], aMin, aMax))
             return true;
-        prev = pt;
     }
     return false;
 }
@@ -1595,15 +1608,16 @@ IMNODAL_API void EndGraph() {
                     }
                 }
             }
-            // Links : selectionnes des que la spline (le bezier cache) touche
-            // le box, meme partiellement. On sample en chords et on teste
-            // chord-vs-rect — un seul "frolement" suffit.
+            // Links : selectionnes des que le path emis par les primitives
+            // touche le box, meme partiellement. On teste chord-vs-rect sur
+            // chaque segment du polyline — un seul "frolement" suffit. Marche
+            // pour bezier, Manhattan, et toutes les formes custom.
             for (const auto& kv : rCtx.links) {
                 if (kv.second.graphId != rGraph.id)
                     continue;
-                if (!kv.second.bezierCached)
+                if (!kv.second.pathCached)
                     continue;
-                if (s_bezierIntersectsRect(kv.second.cachedFromPos, kv.second.cachedP1, kv.second.cachedP2, kv.second.cachedToPos, mn, mx)) {
+                if (s_pathIntersectsRect(kv.second.cachedPath.data(), (int)kv.second.cachedPath.size(), mn, mx)) {
                     if (rGraph.selectedLinks.insert(kv.first).second) {
                         rGraph.lastSelectedLink = kv.first;
                         rGraph.selectionChangedThisFrame = true;
@@ -2296,6 +2310,27 @@ IMNODAL_API SlotRole GetSlotRole(Id aSlotId) {
 
 namespace {
 
+// Squared distance from `aPt` to the line segment (`aA`, `aB`). Returns 0
+// when the projection lands inside the segment and the point is exactly on
+// the line. Used by LinkLineSegment hit-testing — the OBB of width
+// (threshold*2) along the segment is exactly { d² ≤ threshold² }.
+inline float s_pointToSegmentDistanceSq(const ImVec2& aPt, const ImVec2& aA, const ImVec2& aB) {
+    const ImVec2 seg = aB - aA;
+    const ImVec2 toPt = aPt - aA;
+    const float len2 = seg.x * seg.x + seg.y * seg.y;
+    float u = 0.0f;
+    if (len2 > 0.0f) {
+        u = (toPt.x * seg.x + toPt.y * seg.y) / len2;
+        if (u < 0.0f)
+            u = 0.0f;
+        else if (u > 1.0f)
+            u = 1.0f;
+    }
+    const ImVec2 proj = aA + seg * u;
+    const ImVec2 delta = aPt - proj;
+    return delta.x * delta.x + delta.y * delta.y;
+}
+
 // Cubic-Bezier control points from two anchor points + outward tangents.
 // Control point distance scales with the separation so the curve "breathes"
 // nicely when slots are far/close.
@@ -2339,47 +2374,21 @@ static void s_drawBezierLink(
     apDrawList->AddBezierCubic(aFrom, p1, p2, aTo, aColor, aThickness);
 }
 
-// Hit-test: is the mouse within `aThreshold` of the cubic Bézier curve?
-// Approximated by sampling the curve into N line segments.
-static bool s_isMouseOnBezier(const ImVec2& aP0, const ImVec2& aP1, const ImVec2& aP2, const ImVec2& aP3, const ImVec2& aMouse, float aThreshold) {
-    const int kSegments = 24;
-    ImVec2 prev = aP0;
-    const float thr2 = aThreshold * aThreshold;
-    for (int i = 1; i <= kSegments; ++i) {
-        const float t = (float)i / (float)kSegments;
-        const float u = 1.0f - t;
-        const ImVec2 pt = aP0 * (u * u * u) + aP1 * (3.0f * u * u * t) + aP2 * (3.0f * u * t * t) + aP3 * (t * t * t);
-        // Distance from aMouse to the segment (prev, pt).
-        const ImVec2 seg = pt - prev;
-        const ImVec2 toM = aMouse - prev;
-        const float len2 = seg.x * seg.x + seg.y * seg.y;
-        float u2 = 0.0f;
-        if (len2 > 0.0f) {
-            u2 = (toM.x * seg.x + toM.y * seg.y) / len2;
-            if (u2 < 0.0f)
-                u2 = 0.0f;
-            else if (u2 > 1.0f)
-                u2 = 1.0f;
-        }
-        const ImVec2 proj = prev + seg * u2;
-        const ImVec2 delta = aMouse - proj;
-        if (delta.x * delta.x + delta.y * delta.y <= thr2)
-            return true;
-        prev = pt;
-    }
-    return false;
-}
-
 }  // namespace
 
-IMNODAL_API void Link(Id aLinkId, Id aFromSlotId, Id aToSlotId, ImU32 aColor, float aThickness) {
+// =====================================================================
+// Custom links — primitives bas niveau (dessin + hit-test combines)
+// =====================================================================
+
+IMNODAL_API bool BeginLink(Id aLinkId, Id aFromSlotId, Id aToSlotId, float aThickness, ImU32 aColor) {
     Context& rCtx = s_getCtx();
     IM_ASSERT(aLinkId != 0 && "Link id must be non-zero");
+    IM_ASSERT(rCtx.currentLinkId == 0 && "BeginLink called inside another BeginLink/EndLink scope");
 
     auto itF = rCtx.slots.find(aFromSlotId);
     auto itT = rCtx.slots.find(aToSlotId);
     if (itF == rCtx.slots.end() || itT == rCtx.slots.end()) {
-        return;
+        return false;
     }
     SlotState& rFrom = itF->second;
     SlotState& rTo = itT->second;
@@ -2388,61 +2397,146 @@ IMNODAL_API void Link(Id aLinkId, Id aFromSlotId, Id aToSlotId, ImU32 aColor, fl
     rLink.fromSlot = aFromSlotId;
     rLink.toSlot = aToSlotId;
     rLink.graphId = rCtx.currentGraphId;
-    // Default thickness from style if caller passed 0.
     if (aThickness <= 0.0f)
         aThickness = rCtx.style.LinkThickness;
     rLink.thickness = aThickness;
-    // Default color from style if caller passed 0.
     const ImU32 baseColor = (aColor != 0) ? aColor : rCtx.style.Colors[ImNodalCol_Link];
     rLink.color = baseColor;
 
     rFrom.connected = true;
     rTo.connected = true;
 
-    // Resolve tangents (InOut slots are dynamic).
+    // Resolve tangents (InOut sentinel (0,0) -> horizontal, sign from chord).
     const ImVec2 fromTan = s_resolveTangent(rFrom, rTo.screenPos);
     const ImVec2 toTan = s_resolveTangent(rTo, rFrom.screenPos);
 
-    // Hit-test against the bezier.
-    ImVec2 p1, p2;
-    s_bezierCtrl(rFrom.screenPos, fromTan, rTo.screenPos, toTan, p1, p2);
-    // Cache for FlowLink() to reuse this frame.
-    rLink.cachedFromPos = rFrom.screenPos;
-    rLink.cachedToPos = rTo.screenPos;
-    rLink.cachedP1 = p1;
-    rLink.cachedP2 = p2;
-    rLink.bezierCached = true;
+    // Reset path accumulator.
+    rLink.cachedPath.clear();
+    rLink.pathCached = false;
 
-    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    // Open the BeginLink scope.
     const float canvasScale = rCtx.scale > 0.0f ? rCtx.scale : 1.0f;
-    const float hitThreshold = ImMax(aThickness * 2.0f, 6.0f / canvasScale);
+    rCtx.currentLinkId = aLinkId;
+    rCtx.currentLinkBaseColor = baseColor;
+    rCtx.currentLinkThickness = aThickness;
+    rCtx.currentLinkHitThreshold = ImMax(aThickness * 2.0f, 6.0f / canvasScale);
+    rCtx.currentLinkHovered = false;
+    rCtx.currentLinkFromPos = rFrom.screenPos;
+    rCtx.currentLinkToPos = rTo.screenPos;
+    rCtx.currentLinkFromTangent = fromTan;
+    rCtx.currentLinkToTangent = toTan;
 
-    rLink.hovered = s_isMouseOnBezier(rFrom.screenPos, p1, p2, rTo.screenPos, mouse, hitThreshold);
+    // Pick the draw list once. Channel switch happens here (inside graph) or
+    // not at all (standalone, draws on the window list).
+    if (rCtx.graphActive) {
+        rCtx.currentLinkDrawList = rCtx.drawList;
+        s_setChannel(rCtx, GC_Links);
+    } else {
+        rCtx.currentLinkDrawList = ImGui::GetWindowDrawList();
+    }
+    return true;
+}
+
+IMNODAL_API ImVec2 GetLinkFromPos() {
+    Context& rCtx = s_getCtx();
+    return rCtx.currentLinkId != 0 ? rCtx.currentLinkFromPos : ImVec2(0.0f, 0.0f);
+}
+IMNODAL_API ImVec2 GetLinkToPos() {
+    Context& rCtx = s_getCtx();
+    return rCtx.currentLinkId != 0 ? rCtx.currentLinkToPos : ImVec2(0.0f, 0.0f);
+}
+IMNODAL_API ImVec2 GetLinkFromTangent() {
+    Context& rCtx = s_getCtx();
+    return rCtx.currentLinkId != 0 ? rCtx.currentLinkFromTangent : ImVec2(0.0f, 0.0f);
+}
+IMNODAL_API ImVec2 GetLinkToTangent() {
+    Context& rCtx = s_getCtx();
+    return rCtx.currentLinkId != 0 ? rCtx.currentLinkToTangent : ImVec2(0.0f, 0.0f);
+}
+
+IMNODAL_API void SetLinkHitThickness(float aPixelThreshold) {
+    Context& rCtx = s_getCtx();
+    if (rCtx.currentLinkId == 0)
+        return;
+    if (aPixelThreshold > 0.0f)
+        rCtx.currentLinkHitThreshold = aPixelThreshold;
+}
+
+IMNODAL_API void LinkLineSegment(const ImVec2& aP0, const ImVec2& aP1) {
+    Context& rCtx = s_getCtx();
+    if (rCtx.currentLinkId == 0)
+        return;
+    LinkState& rLink = rCtx.links[rCtx.currentLinkId];
+    // Push p0 only on the very first segment so consecutive primitives form
+    // a continuous polyline (each segment's end becomes the next's start).
+    if (rLink.cachedPath.empty())
+        rLink.cachedPath.push_back(aP0);
+    rLink.cachedPath.push_back(aP1);
+
+    const float d2 = s_pointToSegmentDistanceSq(ImGui::GetIO().MousePos, aP0, aP1);
+    const float thr = rCtx.currentLinkHitThreshold;
+    if (d2 <= thr * thr)
+        rCtx.currentLinkHovered = true;
+}
+
+IMNODAL_API void LinkBezierSegment(const ImVec2& aP0, const ImVec2& aP1, const ImVec2& aFromTangent, const ImVec2& aToTangent, int aSegments) {
+    Context& rCtx = s_getCtx();
+    if (rCtx.currentLinkId == 0)
+        return;
+    ImVec2 cp1, cp2;
+    s_bezierCtrl(aP0, aFromTangent, aP1, aToTangent, cp1, cp2);
+    const int N = (aSegments > 0) ? aSegments : 24;
+    ImVec2 prev = aP0;
+    for (int i = 1; i <= N; ++i) {
+        const float t = (float)i / (float)N;
+        const float u = 1.0f - t;
+        const ImVec2 pt = aP0 * (u * u * u) + cp1 * (3.0f * u * u * t) + cp2 * (3.0f * u * t * t) + aP1 * (t * t * t);
+        LinkLineSegment(prev, pt);
+        prev = pt;
+    }
+}
+
+IMNODAL_API void LinkPolyline(const ImVec2* apPoints, int aCount) {
+    Context& rCtx = s_getCtx();
+    if (rCtx.currentLinkId == 0 || apPoints == nullptr || aCount < 2)
+        return;
+    for (int i = 1; i < aCount; ++i) {
+        LinkLineSegment(apPoints[i - 1], apPoints[i]);
+    }
+}
+
+IMNODAL_API void EndLink() {
+    Context& rCtx = s_getCtx();
+    if (rCtx.currentLinkId == 0)
+        return;
+    const Id linkId = rCtx.currentLinkId;
+    LinkState& rLink = rCtx.links[linkId];
+
+    // Finalize hovered state from the OR-accumulator.
+    rLink.hovered = rCtx.currentLinkHovered;
+    rLink.pathCached = !rLink.cachedPath.empty();
+
     // NB : on NE reset PAS clicked / doubleClicked ici. NewFrame s'en charge
     // au debut de chaque frame. Si plusieurs Link() sont appeles avec le meme
-    // segment id (= un segment partage entre plusieurs BaseLink, fusion
-    // visuelle), le PREMIER appel detecte le clic et le set a true ; les
-    // suivants ne re-entrent pas dans la branche canConsume (clickConsumed
+    // id (= fusion visuelle), le PREMIER appel detecte le clic et le set a
+    // true ; les suivants ne re-entrent pas dans canConsume (clickConsumed
     // est deja a true) et ecraseraient l'etat a false si on resetait ici.
     if (rLink.hovered) {
-        rCtx.currentHoveredLink = aLinkId;
+        rCtx.currentHoveredLink = linkId;
     }
 
-    // Track selection at graph scope if we're inside a graph, otherwise use
-    // the context-level standaloneSelectedLink field.
     GraphState* pGraph = rCtx.graphActive ? &rCtx.graphs[rCtx.currentGraphId] : nullptr;
     const bool clickConsumed = pGraph ? pGraph->clickConsumedThisFrame : false;
-
     const bool canConsume = rLink.hovered && !ImGui::IsAnyItemHovered() && !clickConsumed && rCtx.draggingFromSlot == 0;
     if (canConsume) {
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             rLink.clicked = true;
             if (pGraph) {
                 const bool toggle = s_multiSelectHeld(*pGraph);
-                s_selectLink(*pGraph, aLinkId, toggle);
+                s_selectLink(*pGraph, linkId, toggle);
                 pGraph->clickConsumedThisFrame = true;
             } else {
-                rCtx.standaloneSelectedLink = aLinkId;
+                rCtx.standaloneSelectedLink = linkId;
             }
         }
         if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
@@ -2452,32 +2546,45 @@ IMNODAL_API void Link(Id aLinkId, Id aFromSlotId, Id aToSlotId, ImU32 aColor, fl
         }
         if (ImGui::IsMouseClicked(rCtx.settings.contextMenuButton)) {
             rLink.ctxMenuRequested = true;
-            rCtx.ctxMenuLinkId = aLinkId;
+            rCtx.ctxMenuLinkId = linkId;
         }
     }
     if (pGraph) {
-        rLink.selected = (pGraph->selectedLinks.count(aLinkId) > 0);
+        rLink.selected = (pGraph->selectedLinks.count(linkId) > 0);
     } else {
-        rLink.selected = (rCtx.standaloneSelectedLink == aLinkId);
+        rLink.selected = (rCtx.standaloneSelectedLink == linkId);
     }
 
-    ImU32 drawColor = baseColor;
+    // Resolve final color and emit a single AddPolyline. Joining the segments
+    // gives nicer junctions than N independent AddLine calls.
+    ImU32 drawColor = rCtx.currentLinkBaseColor;
     if (rLink.selected) {
         drawColor = rCtx.style.Colors[ImNodalCol_LinkSelected];
     } else if (rLink.hovered) {
         drawColor = rCtx.style.Colors[ImNodalCol_LinkHovered];
     }
-
-    // Draw on the Links channel when inside a graph (so it sits above node
-    // content); otherwise draw directly on the current window's draw list.
-    if (rCtx.graphActive) {
-        auto* const pDrawList = rCtx.drawList;
-        s_setChannel(rCtx, GC_Links);
-        pDrawList->AddBezierCubic(rFrom.screenPos, p1, p2, rTo.screenPos, drawColor, aThickness);
-        s_setChannel(rCtx, GC_Content);
-    } else {
-        ImGui::GetWindowDrawList()->AddBezierCubic(rFrom.screenPos, p1, p2, rTo.screenPos, drawColor, aThickness);
+    if (rLink.cachedPath.size() >= 2 && rCtx.currentLinkDrawList != nullptr) {
+        rCtx.currentLinkDrawList->AddPolyline(
+            rLink.cachedPath.data(),
+            (int)rLink.cachedPath.size(),
+            drawColor,
+            ImDrawFlags_None,
+            rCtx.currentLinkThickness);
     }
+
+    // Restore channel and close the scope.
+    if (rCtx.graphActive) {
+        s_setChannel(rCtx, GC_Content);
+    }
+    rCtx.currentLinkId = 0;
+    rCtx.currentLinkDrawList = nullptr;
+}
+
+IMNODAL_API void Link(Id aLinkId, Id aFromSlotId, Id aToSlotId, ImU32 aColor, float aThickness) {
+    if (!BeginLink(aLinkId, aFromSlotId, aToSlotId, aThickness, aColor))
+        return;
+    LinkBezierSegment(GetLinkFromPos(), GetLinkToPos(), GetLinkFromTangent(), GetLinkToTangent(), 24);
+    EndLink();
 }
 
 // =====================================================================
@@ -3058,9 +3165,11 @@ IMNODAL_API int GetActionContextLinks(Id* apoBuffer, int aCapacity) {
 // Flow animation on a link
 // =====================================================================
 //
-// The flow is rendered as N small dots travelling along the link's bezier.
-// We reuse the cached control points captured by Link() this frame — that's
-// why FlowLink() must be called AFTER the matching Link() call.
+// The flow is rendered as N small dots travelling along the link's path.
+// We walk the cachedPath captured by Link()/EndLink() this frame — that's
+// why FlowLink() must be called AFTER the matching Link()/EndLink() call.
+// Since the path is a polyline, we step it by arc-length and lerp between
+// vertices: works for cubic bezier samples, Manhattan, or any custom shape.
 
 IMNODAL_API void FlowLink(Id aLinkId, float aSpeed, ImU32 aColor) {
     Context& rCtx = s_getCtx();
@@ -3068,19 +3177,27 @@ IMNODAL_API void FlowLink(Id aLinkId, float aSpeed, ImU32 aColor) {
     if (it == rCtx.links.end())
         return;
     LinkState& rLink = it->second;
-    if (!rLink.bezierCached)
-        return;  // Link() wasn't called this frame
+    if (!rLink.pathCached || rLink.cachedPath.size() < 2)
+        return;  // Link() wasn't called this frame, or path is degenerate
 
     constexpr int kDotCount = 5;
-    constexpr int kSamples = 32;
+    const auto& pts = rLink.cachedPath;
+    const int n = (int)pts.size();
+
+    // Cumulative arc-length along the polyline.
+    std::vector<float> cum;
+    cum.resize(n);
+    cum[0] = 0.0f;
+    for (int i = 1; i < n; ++i) {
+        const ImVec2 d = pts[i] - pts[i - 1];
+        cum[i] = cum[i - 1] + std::sqrt(d.x * d.x + d.y * d.y);
+    }
+    const float totalLen = cum.back() + 1e-3f;
 
     // Phase progresses every frame, wraps over [0, 1).
     const float t = static_cast<float>(ImGui::GetTime());
     const float canvasScale = rCtx.scale > 0.0f ? rCtx.scale : 1.0f;
-    // Approximate curve length via the chord (good enough for animation phase).
-    const ImVec2 chord = rLink.cachedToPos - rLink.cachedFromPos;
-    const float chordLen = std::sqrt(chord.x * chord.x + chord.y * chord.y) + 1e-3f;
-    const float phase = std::fmod(t * aSpeed * canvasScale / chordLen, 1.0f);
+    const float phase = std::fmod(t * aSpeed * canvasScale / totalLen, 1.0f);
 
     const ImU32 color = (aColor != 0) ? aColor : rCtx.style.Colors[ImNodalCol_FlowDot];
     const float dotRadius = ImMax(rLink.thickness * 0.9f, 2.0f);
@@ -3093,11 +3210,20 @@ IMNODAL_API void FlowLink(Id aLinkId, float aSpeed, ImU32 aColor) {
         float u = phase + (float)i / (float)kDotCount;
         if (u >= 1.0f)
             u -= 1.0f;
-        const float v = 1.0f - u;
-        const ImVec2 pt = rLink.cachedFromPos * (v * v * v) + rLink.cachedP1 * (3.0f * v * v * u) + rLink.cachedP2 * (3.0f * v * u * u) +
-            rLink.cachedToPos * (u * u * u);
+        const float target = u * totalLen;
+        // Find segment idx where cum[idx] <= target <= cum[idx+1].
+        int seg = 0;
+        for (int s = 1; s < n; ++s) {
+            if (cum[s] >= target) {
+                seg = s - 1;
+                break;
+            }
+            seg = s - 1;
+        }
+        const float segLen = cum[seg + 1] - cum[seg];
+        const float local = (segLen > 0.0f) ? (target - cum[seg]) / segLen : 0.0f;
+        const ImVec2 pt = pts[seg] * (1.0f - local) + pts[seg + 1] * local;
         pDrawList->AddCircleFilled(pt, dotRadius, color);
-        (void)kSamples;
     }
 
     if (rCtx.graphActive)
