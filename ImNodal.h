@@ -51,6 +51,45 @@ SOFTWARE.
 #include <imgui_internal.h>
 #endif
 
+enum ImNodalCol_ {
+    ImNodalCol_GridLine = 0,
+    ImNodalCol_GridSubLine,
+    ImNodalCol_NodeBody,
+    ImNodalCol_NodeBorder,
+    ImNodalCol_NodeBorderSelected,
+    ImNodalCol_NodeHoverHandle,
+    ImNodalCol_SlotDot,
+    ImNodalCol_SlotDotConnected,
+    ImNodalCol_SlotDotHovered,
+    ImNodalCol_Link,  // default link color (when host passes 0)
+    ImNodalCol_LinkHovered,
+    ImNodalCol_LinkSelected,
+    ImNodalCol_RerouteBorder,  // faint frame at rest
+    ImNodalCol_RerouteBorderSelected,
+    ImNodalCol_BoxSelectFill,
+    ImNodalCol_BoxSelectBorder,
+    ImNodalCol_LinkPreviewIdle,    // wire color while dragging, no target hovered
+    ImNodalCol_LinkPreviewAccept,  // wire color when AcceptNewLink fired
+    ImNodalCol_LinkPreviewReject,  // wire color when RejectNewLink fired
+    ImNodalCol_FlowDot,            // moving dot color along FlowLink
+    ImNodalCol_COUNT,
+};
+typedef int ImNodalCol;
+
+enum ImNodalStyleVar_ {
+    ImNodalStyleVar_NodeRounding = 0,       // float
+    ImNodalStyleVar_NodeBorderThickness,    // float
+    ImNodalStyleVar_NodeBodyPadding,        // float
+    ImNodalStyleVar_NodeHoverHandleHeight,  // float
+    ImNodalStyleVar_SlotDotRadius,          // float — recommended dot radius for hosts; not drawn by ImNodal
+    ImNodalStyleVar_SlotMinSize,            // ImVec2 — Dummy size used when BeginSlot/EndSlot encloses no widget
+    ImNodalStyleVar_LinkThickness,          // float (default when Link() gets thickness=0)
+    ImNodalStyleVar_GridSize,               // ImVec2
+    ImNodalStyleVar_GridSubdivs,            // ImVec2
+    ImNodalStyleVar_COUNT,
+};
+typedef int ImNodalStyleVar;
+
 namespace ImNodal {
 
 // =====================================================================
@@ -91,60 +130,11 @@ IMNODAL_API void     NewFrame();
 // GraphSettings) only carry BEHAVIOR (mouse buttons, keys, modes) — never
 // appearance.
 
-enum ImNodalCol_ {
-    ImNodalCol_GridLine = 0,
-    ImNodalCol_GridSubLine,
-    ImNodalCol_NodeBody,
-    ImNodalCol_NodeHeader,                 // default header tint when host doesn't push a per-node color
-    ImNodalCol_NodeBorder,
-    ImNodalCol_NodeBorderSelected,
-    ImNodalCol_NodeHoverHandle,
-    // Slot-dot colors are RECOMMENDED defaults that hosts may read when
-    // drawing their own dot. ImNodal itself does NOT render the dot inside
-    // BeginSlot/EndSlot — only the reroute primitive uses these values.
-    ImNodalCol_SlotDot,
-    ImNodalCol_SlotDotConnected,
-    ImNodalCol_SlotDotHovered,
-    ImNodalCol_SlotHoverFill,              // interaction halo painted by EndGraph behind the slot rect
-    ImNodalCol_SlotHoverBorder,
-    ImNodalCol_Link,                       // default link color (when host passes 0)
-    ImNodalCol_LinkHovered,
-    ImNodalCol_LinkSelected,
-    ImNodalCol_RerouteBorder,              // faint frame at rest
-    ImNodalCol_RerouteBorderSelected,
-    ImNodalCol_BoxSelectFill,
-    ImNodalCol_BoxSelectBorder,
-    ImNodalCol_LinkPreviewIdle,            // wire color while dragging, no target hovered
-    ImNodalCol_LinkPreviewAccept,          // wire color when AcceptNewLink fired
-    ImNodalCol_LinkPreviewReject,          // wire color when RejectNewLink fired
-    ImNodalCol_FlowDot,                    // moving dot color along FlowLink
-    ImNodalCol_COUNT,
-};
-typedef int ImNodalCol;
-
-enum ImNodalStyleVar_ {
-    ImNodalStyleVar_NodeRounding = 0,      // float
-    ImNodalStyleVar_NodeBorderThickness,   // float
-    ImNodalStyleVar_NodeHeaderPadding,     // float
-    ImNodalStyleVar_NodeBodyPadding,       // float
-    ImNodalStyleVar_NodeColumnSpacing,     // float
-    ImNodalStyleVar_NodeHoverHandleHeight, // float
-    ImNodalStyleVar_SlotDotRadius,         // float — recommended dot radius for hosts; not drawn by ImNodal
-    ImNodalStyleVar_SlotMinSize,           // ImVec2 — Dummy size used when BeginSlot/EndSlot encloses no widget
-    ImNodalStyleVar_LinkThickness,         // float (default when Link() gets thickness=0)
-    ImNodalStyleVar_GridSize,              // ImVec2
-    ImNodalStyleVar_GridSubdivs,           // ImVec2
-    ImNodalStyleVar_COUNT,
-};
-typedef int ImNodalStyleVar;
-
 struct Style {
     ImU32  Colors[ImNodalCol_COUNT];
     float  NodeRounding;
     float  NodeBorderThickness;
-    float  NodeHeaderPadding;
     float  NodeBodyPadding;
-    float  NodeColumnSpacing;
     float  NodeHoverHandleHeight;
     float  SlotDotRadius;
     ImVec2 SlotMinSize;
@@ -160,11 +150,11 @@ IMNODAL_API ImU32  GetStyleColorU32(ImNodalCol aIdx);
 IMNODAL_API float  GetStyleVarFloat(ImNodalStyleVar aIdx);
 IMNODAL_API ImVec2 GetStyleVarVec2(ImNodalStyleVar aIdx);
 
-IMNODAL_API void PushStyleColor(ImNodalCol aIdx, ImU32 aCol);
+IMNODAL_API bool PushStyleColor(ImNodalCol aIdx, ImU32 aCol);
 IMNODAL_API void PopStyleColor(int aCount = 1);
 
-IMNODAL_API void PushStyleVar(ImNodalStyleVar aIdx, float aVal);
-IMNODAL_API void PushStyleVar(ImNodalStyleVar aIdx, const ImVec2& aVal);
+IMNODAL_API bool PushStyleVar(ImNodalStyleVar aIdx, float aVal);
+IMNODAL_API bool PushStyleVar(ImNodalStyleVar aIdx, const ImVec2& aVal);
 IMNODAL_API void PopStyleVar(int aCount = 1);
 
 // Human-readable names for style enums (useful for editors / debug UI).
@@ -275,28 +265,29 @@ IMNODAL_API bool IsCanvasSuspended();
 IMNODAL_API void DrawCanvasGrid();
 
 // =====================================================================
-// Graph layer (M1: skeleton — Graph + Node + Slot primitive + sections)
+// Graph layer — Graph + Node + Slot primitive + layout containers
 // =====================================================================
-// Design philosophy: the slot is the primitive. Nodes are intelligent
-// containers that pin slots on their edges. A slot can be emitted ANYWHERE
-// (inside a node section, inside a plain ImGui window, inline with text...).
+// Design philosophy : the slot is the primitive. Nodes are draggable /
+// selectable containers, but ImNodal does NOT impose any layout — the host
+// assembles its node content with BeginH/EndH/BeginV/EndV/Spring (see the
+// "Layout primitives" section below). A slot can be emitted ANYWHERE :
+// inside a node, inside a plain ImGui window, inline with text…
 //
-// Usage (M1):
+// Usage :
 //
 //     if (BeginCanvas("c", size, canvasSettings)) {
 //         if (BeginGraph(graphId, graphSettings)) {
 //             if (BeginNode(nodeId, &pos, nodeSettings)) {
-//                 if (BeginHeader())  { ImGui::Text("Title"); EndHeader(); }
-//                 if (BeginInputs())  {
-//                     if (BeginInputSlot(slotId)) { ImGui::Text("A"); EndSlot(); }
-//                     EndInputs();
-//                 }
-//                 if (BeginCenter())  { /* body widget */ EndCenter(); }
-//                 if (BeginOutputs()) {
-//                     if (BeginOutputSlot(slotId2)) { ImGui::Text("Out"); EndSlot(); }
-//                     EndOutputs();
-//                 }
-//                 if (BeginFooter()) { /* widgets */ EndFooter(); }
+//                 BeginH("##header");
+//                     Spring();
+//                     ImGui::TextUnformatted("Title");
+//                     Spring();
+//                 EndH();
+//                 BeginH("##body");
+//                     if (BeginInputSlot(in_id))  { ImGui::Text("A");   EndSlot(); }
+//                     Spring();
+//                     if (BeginOutputSlot(out_id)) { ImGui::Text("Out"); EndSlot(); }
+//                 EndH();
 //                 EndNode();
 //             }
 //             EndGraph();
@@ -335,14 +326,12 @@ IMNODAL_API Id   GetCurrentGraphId();
 // -----------------------------
 // Node
 // -----------------------------
-// Header tint: by default, BeginNode reads ImNodalCol_NodeHeader from the
-// current style. To customize per-node, push the desired color before
-// BeginNode :
-//     ImNodal::PushStyleColor(ImNodalCol_NodeHeader, datas.color);
-//     ImNodal::BeginNode(id, &pos);
-//     ...
-//     ImNodal::EndNode();
-//     ImNodal::PopStyleColor();
+// BeginNode/EndNode opens a draggable, selectable, hit-testable rect at
+// the canvas position pointed to by `apPos`. ImNodal paints the body fill
+// (ImNodalCol_NodeBody) and the border (NodeBorder / NodeBorderSelected)
+// inside EndNode — nothing else. Use the layout primitives BeginH/V/Spring
+// to assemble the content. Headers, footers, columns, and any tinted band
+// are the host's responsibility (paint via GetNodeBackgroundDrawList).
 struct NodeSettings {
     bool  movable{true};
     bool  hasInnerGraph{false};
@@ -354,34 +343,54 @@ struct NodeSettings {
 IMNODAL_API bool BeginNode(Id aNodeId, ImVec2* apPos, const NodeSettings& arSettings = {});
 IMNODAL_API void EndNode();
 
-// Optional layout sections. None are mandatory. Body = Inputs | Center | Outputs
-// organized in 3 columns via SameLine; Header above body; Footer below.
-IMNODAL_API bool BeginHeader();  IMNODAL_API void EndHeader();
-IMNODAL_API bool BeginInputs();  IMNODAL_API void EndInputs();
-IMNODAL_API bool BeginCenter();  IMNODAL_API void EndCenter();
-IMNODAL_API bool BeginOutputs(); IMNODAL_API void EndOutputs();
-IMNODAL_API bool BeginFooter();  IMNODAL_API void EndFooter();
-
-// Layout container that horizontally aligns whatever ImGui widgets are
-// emitted between Begin and End. Use it to center a title in a header, push
-// a label to the right of the footer, or align any group of widgets within
-// a row. The widgets are real ImGui widgets — full styling (PushStyleColor,
-// fonts, hovering, clicking, custom draw) works as usual.
+// =====================================================================
+// Layout primitives — H / V containers + Spring
+// =====================================================================
+// Generic stack-layout containers usable ONLY inside a BeginNode/EndNode
+// scope. Lets the host assemble a node's content with horizontal /
+// vertical containers and `Spring()` distributing the remaining space —
+// equivalent in spirit to thedmd's BeginHorizontal/Vertical/Spring (but
+// scoped to ImNodal nodes only, no global ImGui pollution).
 //
-//   ratio: 0.0 = left, 0.5 = center, 1.0 = right (along the X axis)
-//   availableWidth:
-//     - > 0 : explicit width to align within
-//     - 0   : auto. Inside a node → use the node's width (from the previous
-//             frame's EndNode); outside → ImGui::GetContentRegionAvail().x
+// `aSize.x` and `aSize.y` semantics, per axis :
+//     > 0  : forced size in pixels
+//     == 0 : natural size (= sum of non-Spring children measured at the
+//            previous frame). Spring() inside is a no-op.
+//     < 0  : fill parent. At the top of a node body that means
+//            `node.size.x - 2 * NodeBodyPadding` (or .y) measured at the
+//            previous frame. First frame falls back to natural.
 //
-// Implementation note: alignment uses the group's width MEASURED on the
-// PREVIOUS frame to compute this frame's indent. The first frame a given
-// scope is laid out, the contents are left-aligned (no measurement yet);
-// from the second frame on, alignment is correct. Width changes between
-// frames produce a 1-frame visual lag — fine for most node layouts, since
-// the node size itself follows the same lag.
-IMNODAL_API void BeginAlign(float aRatio, float aAvailableWidth = 0.0f);
-IMNODAL_API void EndAlign();
+// Spring(weight) emits a `ImGui::Dummy` of the size needed to reach the
+// container's target along its main axis, then `SameLine(0, 0)` for
+// horizontal containers. Phase 1 supports a single Spring per container ;
+// multi-Spring + weights distribution comes later.
+//
+// Typical node layout :
+//
+//     ImNodal::BeginV("##node", ImVec2(-1.0f, 0.0f));
+//         // header centered on the node width
+//         ImNodal::BeginH("##header");
+//             ImNodal::Spring();
+//             ImGui::TextUnformatted("Node title");
+//             ImNodal::Spring();
+//         ImNodal::EndH();
+//
+//         // body : inputs left, outputs right, Spring between
+//         ImNodal::BeginH("##body");
+//             for (auto& s : inputs) draw_slot(s);
+//             ImNodal::Spring();
+//             for (auto& s : outputs) draw_slot(s);
+//         ImNodal::EndH();
+//     ImNodal::EndV();
+//
+// EndNode asserts the layout stack is empty (host must close every
+// container it opened). NewFrame clears any leftover state from a missing
+// EndH/EndV the previous frame.
+IMNODAL_API bool BeginH(const char* aId, const ImVec2& aSize = ImVec2(-1.0f, 0.0f));
+IMNODAL_API void EndH();
+IMNODAL_API bool BeginV(const char* aId, const ImVec2& aSize = ImVec2(0.0f, -1.0f));
+IMNODAL_API void EndV();
+IMNODAL_API void Spring(float aWeight = 1.0f);
 
 // -----------------------------
 // Slot (primitive — usable anywhere)
@@ -443,6 +452,7 @@ IMNODAL_API bool BeginOutputSlot(Id aSlotId, const SlotSettings& arSettings = {}
 // -----------------------------
 IMNODAL_API ImVec2 GetSlotScreenPos(Id aSlotId);
 IMNODAL_API ImVec2 GetSlotTangent(Id aSlotId);         // unit vector pointing away from the node edge
+IMNODAL_API ImRect GetSlotHitRect(Id aSlotId);         // last frame's screen-space hit rect (= group rect of the slot)
 IMNODAL_API bool   IsSlotHovered(Id aSlotId);
 IMNODAL_API bool   IsSlotConnected(Id aSlotId);
 
@@ -499,6 +509,10 @@ IMNODAL_API SlotRole GetSlotRole(Id aSlotId);              // useful for rule ch
 // (commit). RejectNewLink paints it red.
 
 IMNODAL_API bool BeginConnectionCreate();
+// Slot id the user is currently dragging a link from (0 if no drag active).
+// Useful to resolve the source slot's host-side color BEFORE calling
+// BeginConnectionCreate so the preview wire's idle tint matches.
+IMNODAL_API Id GetDraggingFromSlot();
 IMNODAL_API bool QueryNewLink(Id* apoFromSlotId, Id* apoToSlotId);
 IMNODAL_API bool QueryNewNodeFromSlot(Id* apoFromSlotId);
 IMNODAL_API bool AcceptNewLink(ImU32 aColor = 0);
@@ -596,7 +610,7 @@ IMNODAL_API int  GetActionContextLinks(Id* apoBuffer, int aCapacity);
 // Call right AFTER Link(...) for the same id. Draws moving dots along the
 // curve. Speed is in canvas units per second. aColor==0 picks a default
 // accent based on the link color.
-IMNODAL_API void FlowLink(Id aLinkId, float aSpeed = 200.0f, ImU32 aColor = 0);
+IMNODAL_API void FlowLink(Id aLinkId, float aSpeed = 2.0f, ImU32 aColor = 0);
 
 // =====================================================================
 // Per-node draw lists (custom overlays under or above node content)

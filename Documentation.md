@@ -50,15 +50,18 @@ if (ImNodal::BeginCanvas("MyCanvas", ImVec2(0, 0))) {
     if (ImNodal::BeginGraph(0xCAFEull)) {
         static ImVec2 pos(100, 100);
         if (ImNodal::BeginNode(1, &pos)) {
-            if (ImNodal::BeginHeader()) { ImGui::Text("Hello"); ImNodal::EndHeader(); }
-            if (ImNodal::BeginInputs()) {
+            // Layout assemblé via BeginH/V/Spring (header centré, body avec
+            // inputs gauche / outputs droite, Spring pour pousser à droite).
+            ImNodal::BeginH("##header");
+                ImNodal::Spring();
+                ImGui::TextUnformatted("Hello");
+                ImNodal::Spring();
+            ImNodal::EndH();
+            ImNodal::BeginH("##body");
                 if (ImNodal::BeginInputSlot(2)) { ImGui::Text("in"); ImNodal::EndSlot(); }
-                ImNodal::EndInputs();
-            }
-            if (ImNodal::BeginOutputs()) {
+                ImNodal::Spring();
                 if (ImNodal::BeginOutputSlot(3)) { ImGui::Text("out"); ImNodal::EndSlot(); }
-                ImNodal::EndOutputs();
-            }
+            ImNodal::EndH();
             ImNodal::EndNode();
         }
         ImNodal::EndGraph();
@@ -204,43 +207,100 @@ void EndNode();
 `pos` is **in/out canvas-space**. When non-null and `movable`, dragging the
 node updates it. Pass a pointer to your master copy.
 
-### Per-node header tint
+### What ImNodal paints itself
 
-The default header color comes from `ImNodalCol_NodeHeader`. To override
-per node, push the color before `BeginNode` :
+Inside `EndNode`, ImNodal only paints :
+- the **body fill** rectangle (color `ImNodalCol_NodeBody`, rounded corners
+  with `ImNodalStyleVar_NodeRounding`).
+- the **border** (color `ImNodalCol_NodeBorder`, or `NodeBorderSelected`
+  when the node is selected; thickness from `ImNodalStyleVar_NodeBorderThickness`).
+- an optional **hover-handle bar** at the top, when `NodeSettings::drawHoverHandle`
+  is set and the mouse is over the node (used by reroute primitives).
 
-```cpp
-ImNodal::PushStyleColor(ImNodal::ImNodalCol_NodeHeader, myColor);
-ImNodal::BeginNode(id, &pos);
-...
-ImNodal::EndNode();
-ImNodal::PopStyleColor();
-```
+There is **no header tint, no body sectioning, no automatic centering**
+done by ImNodal. The host owns all of that — typically by painting a
+colored band into `GetNodeBackgroundDrawList(id)` over the upper part of
+the node rect and assembling content with `BeginH/V/Spring`.
 
-### Layout sections
+### Layout primitives — `BeginH/V/Spring`
 
-All optional. Body = `Inputs | Center | Outputs` laid out as 3 columns.
-Header sits above the body, Footer below.
-
-```cpp
-bool BeginHeader();   void EndHeader();
-bool BeginInputs();   void EndInputs();
-bool BeginCenter();   void EndCenter();
-bool BeginOutputs();  void EndOutputs();
-bool BeginFooter();   void EndFooter();
-```
-
-### `BeginAlign` — horizontal alignment of a row of widgets
+The host assembles the node's content with horizontal and vertical
+containers, plus `Spring()` to distribute the remaining space along the
+container's main axis. Usable ONLY inside a `BeginNode/EndNode` scope.
 
 ```cpp
-ImNodal::BeginAlign(0.5f);          // 0=left, 0.5=center, 1=right
-ImGui::TextUnformatted("Title");
-ImNodal::EndAlign();
+bool BeginH(const char* id, const ImVec2& size = ImVec2(-1.0f, 0.0f));
+void EndH();
+bool BeginV(const char* id, const ImVec2& size = ImVec2(0.0f, -1.0f));
+void EndV();
+void Spring(float weight = 1.0f);
 ```
 
-Inside a node, available width auto-falls-back to last frame's node width.
-**Caveat :** alignment uses the previous frame's measured width, so the
-first frame is left-aligned and width changes lag by one frame.
+`size.x` / `size.y` semantics, per axis :
+- `> 0`  : forced size in pixels.
+- `== 0` : natural size = sum of non-Spring children measured at the
+  previous frame. `Spring()` is a no-op (no gap to fill).
+- `< 0`  : fill parent (parent container's target along the same axis,
+  or the node body width/height when the container is at the top).
+
+`Spring(weight)` claims the gap between the container's target and the
+sum of non-Spring children sizes. Phase 1 supports a single Spring per
+container (multi-Spring with weight distribution is roadmapped).
+
+```cpp
+// Header centered on the node width :
+ImNodal::BeginH("##header");
+    ImNodal::Spring();
+    ImGui::TextUnformatted("Node title");
+    ImNodal::Spring();
+ImNodal::EndH();
+
+// Body : inputs left, outputs right, Spring in between :
+ImNodal::BeginH("##body");
+    if (BeginInputSlot(in_id))  { ImGui::Text("in");  EndSlot(); }
+    ImNodal::Spring();
+    if (BeginOutputSlot(out_id)) { ImGui::Text("out"); EndSlot(); }
+ImNodal::EndH();
+```
+
+Children of an horizontal container are auto-`SameLine`d (no manual
+`SameLine` needed between them). Children of a vertical container stack
+naturally.
+
+**1-frame lag** : Spring uses the natural size measured at frame N-1 to
+compute its fill at frame N. First frame falls back to "no gap" — the
+node may be slightly off for one frame after a resize, then converges.
+
+### Painting your own header tint
+
+The recommended pattern : assemble the header with `BeginH/Spring/Text/Spring/EndH`,
+read `ImGui::GetItemRectMin()` / `Max()` after `EndH`, then in/after
+`EndNode` paint the band into the node background draw list.
+
+```cpp
+BeginNode(id, &pos);
+    BeginH("##header");
+        Spring();
+        ImGui::TextUnformatted(name);
+        Spring();
+    EndH();
+    const ImVec2 headerMin = ImGui::GetItemRectMin();
+    const ImVec2 headerMax = ImGui::GetItemRectMax();
+    BeginH("##body");
+        // ... slots ...
+    EndH();
+EndNode();
+
+// Header band : full-width tint above the body fill.
+const ImRect nodeRect = GetNodeRect(id);
+if (auto* dl = GetNodeBackgroundDrawList(id)) {
+    const float r = GetStyleVarFloat(ImNodalStyleVar_NodeRounding);
+    dl->AddRectFilled(
+        ImVec2(nodeRect.Min.x, nodeRect.Min.y),
+        ImVec2(nodeRect.Max.x, headerMax.y),
+        myHeaderColor, r, ImDrawFlags_RoundCornersTop);
+}
+```
 
 ### Per-node custom draw
 
@@ -293,21 +353,32 @@ if (ImNodal::BeginInputSlot(slotId)) {
 }
 ```
 
-ImNodal also paints a button-style halo behind the slot rect when hovered
-(colors `ImNodalCol_SlotHoverFill` / `ImNodalCol_SlotHoverBorder`) — that
-is the only visual feedback ImNodal owns on a non-reroute slot.
+ImNodal does NOT paint any hover halo around the slot itself — the host
+draws whatever feedback it wants, typically by reading
+`GetSlotHitRect(id)` and `IsSlotHovered(id)` and emitting a translucent
+`AddRectFilled` + `AddRect` over the slot's rect.
 
-### Default link pivot
+### Default link pivot and tangent
 
-The pivot (point where links connect) defaults to the **CENTER of the group
-rect, regardless of role** — same convention as
-thedmd/imgui-node-editor (`PivotAlignment = (0.5, 0.5)`,
-`PivotSize = (0, 0)`). The role only drives the link tangent (Input → -X,
-Output → +X, InOut → auto).
+The **pivot** (point where links connect) defaults to the CENTER of the
+group rect, same convention as thedmd/imgui-node-editor (`PivotAlignment
+= (0.5, 0.5)`, `PivotSize = (0, 0)`). Push it to a different edge via
+`SlotAlignment` (see below).
 
-If the visible mark you paint sits on a specific edge of the content
-(typical : icon at the right of an output, icon at the left of an input),
-push the pivot to that edge with `SlotAlignment` (see the next section).
+The **link tangent** (direction the link curve leaves the slot) is now
+**derived from `slotAlignment`**, not from `SlotRole`. The mapping :
+
+| alignment | tangent |
+|---|---|
+| `x ≤ 0.25` | `(-1, 0)` |
+| `x ≥ 0.75` | `( 1, 0)` |
+| `y ≤ 0.25` | `(0, -1)` |
+| `y ≥ 0.75` | `(0,  1)` |
+| centered (default `(0.5, 0.5)`) | `(0, 0)` — resolved dynamically by `Link` |
+
+`SlotRole_InOut` always forces a `(0, 0)` tangent (used by reroute).
+`SlotRole_Input/Output` are now purely semantic — they only feed the
+connect-rules state machine. Set the alignment to control the tangent.
 
 The hit rect equals the group rect (no inflation, since there is no dot to
 extend around).
@@ -623,16 +694,16 @@ void ShowStyleColorsEditor();
 void ShowStyleVarsEditor();
 ```
 
-Color enum (`ImNodalCol_*`) covers the grid lines, node body / header /
-border, slot interaction halo (the only piece ImNodal paints on a slot),
-recommended-default slot-dot colors (read by hosts / reroute), link states
-(idle / hover / select / preview-accept / preview-reject), reroute
-recommended ring colors, box selection and flow dot.
+Color enum (`ImNodalCol_*`) covers the grid lines, node body / border /
+hover-handle (the only things ImNodal paints on the node), recommended
+slot-dot colors (read by hosts and the reroute primitive), link states
+(idle / hover / selected / preview-accept / preview-reject), reroute ring
+colors, box selection, and flow dot.
 
 Var enum (`ImNodalStyleVar_*`) covers node rounding, border thickness,
-header / body padding, column spacing, hover-handle height, recommended
-slot-dot radius (read by hosts / reroute), slot min size (Dummy size for
-empty slots), link thickness, grid size and grid subdivisions.
+body padding, hover-handle height, recommended slot-dot radius (read by
+hosts / reroute), slot min size (Dummy size for empty slots), link
+thickness, grid size and grid subdivisions.
 
 ---
 

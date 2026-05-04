@@ -72,28 +72,53 @@ struct NodeState {
     bool ctxMenuRequested{false};  // right-click on node, set by EndNode
     // Settings snapshot for EndNode draw
     NodeSettings settings;
-    // Header rect (screen), filled at EndHeader, used by EndNode for header tint
-    ImRect headerScreenRect{};
     // Last frame's screen-space rect (for GetNodeRect / per-node drawlists)
     ImRect lastScreenRect{};
-    bool hasHeader{false};
-    // Body column tracking (to emit SameLine between Inputs/Center/Outputs automatically)
-    bool bodyColumnOpened{false};
-    // Reroute marker: set by BeginRerouteNode. Switches the selection frame
-    // and the slot hover halo from rectangle to CIRCLE — matches UE-style
-    // reroutes (a small dot with a ring on hover/select instead of a square).
+    // Reroute marker: set by BeginRerouteNode. Switches the visual treatment
+    // (no body fill, no border) — the host paints its own dot + ring.
     bool isReroute{false};
     Id rerouteSlotId{0};             // valid only when isReroute (used to find dot center)
     float rerouteHitRadius{0.0f};    // circular hit radius used for the reroute slot (host-supplied)
+    // Max natural width/height of all TOP-LEVEL BeginH/V containers emitted
+    // inside this node. Used by "fill parent" mode of subsequent toplevel
+    // containers to size against their siblings rather than against
+    // node.size — avoids the self-referential feedback that would bake the
+    // current padding into the next frame's Spring fill.
+    float currentMaxToplevelNatWidth{0.0f};
+    float currentMaxToplevelNatHeight{0.0f};
+    float lastFrameMaxToplevelNatWidth{0.0f};
+    float lastFrameMaxToplevelNatHeight{0.0f};
     // Pointer to user's master copy of pos — updated on drag at EndNode
     ImVec2* userPosPtr{nullptr};
 };
 
-// Per-scope persistent state for BeginAlign/EndAlign. The previous frame's
-// measured group width drives this frame's indent.
-struct AlignSlot {
-    float lastWidth{0.0f};      // group width measured at last EndAlign
-    float appliedIndent{0.0f};  // indent applied at BeginAlign, undone at EndAlign
+// =====================================================================
+// Layout primitives — H/V containers + Spring (state)
+// =====================================================================
+// Active stack frame. One entry per open BeginH/BeginV in the current node.
+struct LayoutContainer {
+    ImGuiID id{0};
+    bool isHorizontal{true};
+    // Snapshot taken at Begin* — used by Spring to know the parent target
+    // and by End* to compute the natural size.
+    ImVec2 startCursorScreen{};
+    ImVec2 targetSize{};       // resolved at Begin (>0 forced, 0 natural, <0 fill parent)
+    float consumedAlongAxis{0.0f};  // sum of Spring fills emitted so far this frame
+    float springsTotalWeight{0.0f}; // sum of Spring weights opened so far this frame
+    // Number of sub-containers / Springs already opened in this container.
+    // Used by horizontal containers to emit a SameLine(0,0) before each
+    // non-first child so they stack horizontally.
+    int childCount{0};
+};
+
+// Per-id persistent slot (survives across frames). Stores the natural size
+// (= sum of non-Spring children's widths/heights) and the sum of Spring
+// weights measured at the previous EndH/EndV — used by Spring this frame
+// to compute its share of the gap.
+struct LayoutSlot {
+    float lastNatWidth{0.0f};
+    float lastNatHeight{0.0f};
+    float lastSpringsTotalWeight{0.0f};
 };
 
 struct LinkState {
@@ -244,10 +269,6 @@ struct Context {
     // and substitutes a min-size Dummy so the slot still has a hit area.
     ImVec2 currentSlotBeginCursor{};
 
-    // Section tracking (so EndFooter etc. know what to close)
-    enum Section { Section_None, Section_Header, Section_Inputs, Section_Center, Section_Outputs, Section_Footer };
-    Section currentSection{Section_None};
-
     // Active drag target (node being dragged, 0 = none)
     Id draggingNodeId{0};
     ImVec2 dragStartNodePos{};
@@ -315,16 +336,15 @@ struct Context {
     ImVec2 slotPivotOffset{0.0f, 0.0f}; // extra px offset added to screenPos
 
     // -----------------------------
-    // BeginAlign / EndAlign layout container
+    // BeginH/V/Spring layout primitives
     // -----------------------------
-    // Persistent: keyed by ImGui scope ID, remembers last frame's group width
-    // so this frame can compute the right indent.
-    std::unordered_map<ImGuiID, AlignSlot> alignSlots;
-    // Stack of currently-open BeginAlign IDs (to support nesting/sequential).
-    std::vector<ImGuiID> alignStack;
-    // Per-frame counter for auto-generating unique IDs across multiple
-    // BeginAlign calls in the same ImGui scope.
-    int alignCallCounter{0};
+    // Active container stack (one entry per open BeginH/V at the current
+    // moment). Empty between EndNode and the next BeginNode.
+    std::vector<LayoutContainer> layoutStack;
+    // Persistent natural-size cache, keyed by ImGui scope ID. Spring at
+    // frame N reads this to compute its fill ; EndH/EndV writes it for next
+    // frame.
+    std::unordered_map<ImGuiID, LayoutSlot> layoutSlots;
 
     // -----------------------------
     // Box-select state (started by left-drag from empty canvas)
@@ -391,7 +411,9 @@ static void s_doNewFrame(Context& arCtx) {
     arCtx.slotSize = ImVec2(0.0f, 0.0f);
     arCtx.slotPivotOffset = ImVec2(0.0f, 0.0f);
 
-    arCtx.alignCallCounter = 0;
+    // Layout primitive : drop any leftover container from a previous frame
+    // where the host forgot an EndH/EndV. Persistent layoutSlots survive.
+    arCtx.layoutStack.clear();
 
     for (auto& kv : arCtx.slots) {
         kv.second.connected = false;
@@ -667,15 +689,12 @@ Style::Style() {
     Colors[ImNodalCol_GridLine] = IM_COL32(200, 200, 200, 40);
     Colors[ImNodalCol_GridSubLine] = IM_COL32(200, 200, 200, 10);
     Colors[ImNodalCol_NodeBody] = IM_COL32(50, 50, 50, 230);
-    Colors[ImNodalCol_NodeHeader] = IM_COL32(60, 120, 180, 255);
     Colors[ImNodalCol_NodeBorder] = IM_COL32(80, 80, 80, 255);
     Colors[ImNodalCol_NodeBorderSelected] = IM_COL32(255, 180, 0, 255);
     Colors[ImNodalCol_NodeHoverHandle] = IM_COL32(255, 255, 255, 120);
     Colors[ImNodalCol_SlotDot] = IM_COL32(200, 200, 200, 255);
     Colors[ImNodalCol_SlotDotConnected] = IM_COL32(255, 220, 0, 255);
     Colors[ImNodalCol_SlotDotHovered] = IM_COL32(255, 255, 255, 255);
-    Colors[ImNodalCol_SlotHoverFill] = IM_COL32(255, 255, 255, 32);
-    Colors[ImNodalCol_SlotHoverBorder] = IM_COL32(255, 255, 255, 110);
     Colors[ImNodalCol_Link] = IM_COL32(220, 220, 220, 230);
     Colors[ImNodalCol_LinkHovered] = IM_COL32(255, 255, 255, 240);
     Colors[ImNodalCol_LinkSelected] = IM_COL32(255, 180, 0, 230);
@@ -690,9 +709,7 @@ Style::Style() {
 
     NodeRounding = 4.0f;
     NodeBorderThickness = 1.5f;
-    NodeHeaderPadding = 6.0f;
     NodeBodyPadding = 6.0f;
-    NodeColumnSpacing = 10.0f;
     NodeHoverHandleHeight = 4.0f;
     SlotDotRadius = 5.0f;
     SlotMinSize = ImVec2(12.0f, 12.0f);
@@ -716,9 +733,7 @@ IMNODAL_API float GetStyleVarFloat(ImNodalStyleVar aIdx) {
     switch (aIdx) {
         case ImNodalStyleVar_NodeRounding: return s.NodeRounding;
         case ImNodalStyleVar_NodeBorderThickness: return s.NodeBorderThickness;
-        case ImNodalStyleVar_NodeHeaderPadding: return s.NodeHeaderPadding;
         case ImNodalStyleVar_NodeBodyPadding: return s.NodeBodyPadding;
-        case ImNodalStyleVar_NodeColumnSpacing: return s.NodeColumnSpacing;
         case ImNodalStyleVar_NodeHoverHandleHeight: return s.NodeHoverHandleHeight;
         case ImNodalStyleVar_SlotDotRadius: return s.SlotDotRadius;
         case ImNodalStyleVar_LinkThickness: return s.LinkThickness;
@@ -737,12 +752,13 @@ IMNODAL_API ImVec2 GetStyleVarVec2(ImNodalStyleVar aIdx) {
     }
 }
 
-IMNODAL_API void PushStyleColor(ImNodalCol aIdx, ImU32 aCol) {
+IMNODAL_API bool PushStyleColor(ImNodalCol aIdx, ImU32 aCol) {
     if (aIdx < 0 || aIdx >= ImNodalCol_COUNT)
-        return;
+        return false;
     Context& rCtx = s_getCtx();
     rCtx.colorStack.push_back({aIdx, rCtx.style.Colors[aIdx]});
     rCtx.style.Colors[aIdx] = aCol;
+    return true;
 }
 
 IMNODAL_API void PopStyleColor(int aCount) {
@@ -760,9 +776,7 @@ inline float* s_styleVarFloatPtr(Style& s, ImNodalStyleVar aIdx) {
     switch (aIdx) {
         case ImNodalStyleVar_NodeRounding: return &s.NodeRounding;
         case ImNodalStyleVar_NodeBorderThickness: return &s.NodeBorderThickness;
-        case ImNodalStyleVar_NodeHeaderPadding: return &s.NodeHeaderPadding;
         case ImNodalStyleVar_NodeBodyPadding: return &s.NodeBodyPadding;
-        case ImNodalStyleVar_NodeColumnSpacing: return &s.NodeColumnSpacing;
         case ImNodalStyleVar_NodeHoverHandleHeight: return &s.NodeHoverHandleHeight;
         case ImNodalStyleVar_SlotDotRadius: return &s.SlotDotRadius;
         case ImNodalStyleVar_LinkThickness: return &s.LinkThickness;
@@ -779,30 +793,32 @@ inline ImVec2* s_styleVarVec2Ptr(Style& s, ImNodalStyleVar aIdx) {
 }
 }  // namespace
 
-IMNODAL_API void PushStyleVar(ImNodalStyleVar aIdx, float aVal) {
+IMNODAL_API bool PushStyleVar(ImNodalStyleVar aIdx, float aVal) {
     Context& rCtx = s_getCtx();
     float* p = s_styleVarFloatPtr(rCtx.style, aIdx);
     if (p == nullptr)
-        return;
+        return false;
     VarMod m;
     m.idx = aIdx;
     m.isVec2 = false;
     m.prevF = *p;
     *p = aVal;
     rCtx.varStack.push_back(m);
+    return true;
 }
 
-IMNODAL_API void PushStyleVar(ImNodalStyleVar aIdx, const ImVec2& aVal) {
+IMNODAL_API bool PushStyleVar(ImNodalStyleVar aIdx, const ImVec2& aVal) {
     Context& rCtx = s_getCtx();
     ImVec2* p = s_styleVarVec2Ptr(rCtx.style, aIdx);
     if (p == nullptr)
-        return;
+        return false;
     VarMod m;
     m.idx = aIdx;
     m.isVec2 = true;
     m.prevV2 = *p;
     *p = aVal;
     rCtx.varStack.push_back(m);
+    return true;
 }
 
 IMNODAL_API void PopStyleVar(int aCount) {
@@ -831,15 +847,12 @@ IMNODAL_API const char* GetStyleColorName(ImNodalCol aIdx) {
         case ImNodalCol_GridLine: return "GridLine";
         case ImNodalCol_GridSubLine: return "GridSubLine";
         case ImNodalCol_NodeBody: return "NodeBody";
-        case ImNodalCol_NodeHeader: return "NodeHeader";
         case ImNodalCol_NodeBorder: return "NodeBorder";
         case ImNodalCol_NodeBorderSelected: return "NodeBorderSelected";
         case ImNodalCol_NodeHoverHandle: return "NodeHoverHandle";
         case ImNodalCol_SlotDot: return "SlotDot";
         case ImNodalCol_SlotDotConnected: return "SlotDotConnected";
         case ImNodalCol_SlotDotHovered: return "SlotDotHovered";
-        case ImNodalCol_SlotHoverFill: return "SlotHoverFill";
-        case ImNodalCol_SlotHoverBorder: return "SlotHoverBorder";
         case ImNodalCol_Link: return "Link";
         case ImNodalCol_LinkHovered: return "LinkHovered";
         case ImNodalCol_LinkSelected: return "LinkSelected";
@@ -859,9 +872,7 @@ IMNODAL_API const char* GetStyleVarName(ImNodalStyleVar aIdx) {
     switch (aIdx) {
         case ImNodalStyleVar_NodeRounding: return "NodeRounding";
         case ImNodalStyleVar_NodeBorderThickness: return "NodeBorderThickness";
-        case ImNodalStyleVar_NodeHeaderPadding: return "NodeHeaderPadding";
         case ImNodalStyleVar_NodeBodyPadding: return "NodeBodyPadding";
-        case ImNodalStyleVar_NodeColumnSpacing: return "NodeColumnSpacing";
         case ImNodalStyleVar_NodeHoverHandleHeight: return "NodeHoverHandleHeight";
         case ImNodalStyleVar_SlotDotRadius: return "SlotDotRadius";
         case ImNodalStyleVar_SlotMinSize: return "SlotMinSize";
@@ -900,9 +911,7 @@ IMNODAL_API void ShowStyleVarsEditor() {
         const Style def{};
         s.NodeRounding = def.NodeRounding;
         s.NodeBorderThickness = def.NodeBorderThickness;
-        s.NodeHeaderPadding = def.NodeHeaderPadding;
         s.NodeBodyPadding = def.NodeBodyPadding;
-        s.NodeColumnSpacing = def.NodeColumnSpacing;
         s.NodeHoverHandleHeight = def.NodeHoverHandleHeight;
         s.SlotDotRadius = def.SlotDotRadius;
         s.SlotMinSize = def.SlotMinSize;
@@ -922,9 +931,7 @@ IMNODAL_API void ShowStyleVarsEditor() {
         switch (v) {
             case ImNodalStyleVar_NodeRounding: return {0.0f, 20.0f, 0.1f};
             case ImNodalStyleVar_NodeBorderThickness: return {0.0f, 8.0f, 0.1f};
-            case ImNodalStyleVar_NodeHeaderPadding: return {0.0f, 32.0f, 0.5f};
             case ImNodalStyleVar_NodeBodyPadding: return {0.0f, 32.0f, 0.5f};
-            case ImNodalStyleVar_NodeColumnSpacing: return {0.0f, 64.0f, 0.5f};
             case ImNodalStyleVar_NodeHoverHandleHeight: return {0.0f, 32.0f, 0.5f};
             case ImNodalStyleVar_SlotDotRadius: return {1.0f, 20.0f, 0.1f};
             case ImNodalStyleVar_LinkThickness: return {0.5f, 16.0f, 0.1f};
@@ -1301,12 +1308,13 @@ namespace {
 //            the user widgets but below the drag-preview overlay.
 enum GraphChannel {
     GC_Links = 0,       // links drawn under everything else
-    GC_Background = 1,  // node bg + border + slot dots
-    GC_UserBg = 2,      // user-drawn overlays under content
-    GC_Content = 3,     // user widgets inside nodes
-    GC_UserFg = 4,      // user-drawn overlays above content
-    GC_Overlay = 5,     // box-select, drag-preview link (topmost)
-    GC_Count = 6,
+    GC_BgFill = 1,      // node body fill
+    GC_UserBg = 2,      // user-drawn overlays UNDER the border (host header band, etc.)
+    GC_BgBorder = 3,    // node border + hover handle (drawn ON TOP of user header band so border stays visible all around)
+    GC_Content = 4,     // user widgets inside nodes
+    GC_UserFg = 5,      // user-drawn overlays above content
+    GC_Overlay = 6,     // box-select, drag-preview link (topmost)
+    GC_Count = 7,
 };
 
 // Hash Id(u64) -> ImGuiID(u32). ImGui uses u32 internally; we need to push
@@ -1491,7 +1499,6 @@ IMNODAL_API void EndGraph() {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.graphActive && "EndGraph without matching BeginGraph");
     IM_ASSERT(rCtx.currentNodeId == 0 && "EndGraph while a node is still open");
-    IM_ASSERT(rCtx.currentSection == Context::Section_None && "EndGraph while a section is still open");
 
     GraphState& rGraph = rCtx.graphs[rCtx.currentGraphId];
     auto* const pDrawList = rCtx.drawList;
@@ -1612,39 +1619,12 @@ IMNODAL_API void EndGraph() {
     // Reset for next frame
     rGraph.clickConsumedThisFrame = false;
 
-    // ---- Slot interaction halo ----
-    // BeginSlot/EndSlot itself paints nothing visible — the host owns the
-    // dot/icon/widget rendering. EndGraph still paints a button-style hover
-    // frame around the slot's hit rect so the user has a clear "this region
-    // is interactive" feedback (just like ImGui::Button's hover highlight).
-    // Reroute slots skip the halo : their feedback is the dot/ring the host
-    // paints, driven by IsSlotHovered / IsNodeSelected.
-    if (!rGraph.frameSlotOrder.empty()) {
-        pDrawList->ChannelsSetCurrent(GC_Background);
-        constexpr float kHoverRounding = 3.0f;
-        const ImU32 kHoverFill = rCtx.style.Colors[ImNodalCol_SlotHoverFill];
-        const ImU32 kHoverBorder = rCtx.style.Colors[ImNodalCol_SlotHoverBorder];
-        for (Id sid : rGraph.frameSlotOrder) {
-            auto it = rCtx.slots.find(sid);
-            if (it == rCtx.slots.end())
-                continue;
-            const SlotState& s = it->second;
-            // Reroute slots : skip the rectangular halo. The host renders
-            // a circular ring/dot (see BeginRerouteNode docs) so the rect
-            // would clash visually and steal click area meant for the node.
-            bool isOnReroute = false;
-            if (s.parentNode != 0) {
-                auto nIt = rCtx.nodes.find(s.parentNode);
-                if (nIt != rCtx.nodes.end())
-                    isOnReroute = nIt->second.isReroute;
-            }
-            if (s.hovered && !isOnReroute && s.lastHitRect.Min.x < s.lastHitRect.Max.x) {
-                pDrawList->AddRectFilled(s.lastHitRect.Min, s.lastHitRect.Max, kHoverFill, kHoverRounding);
-                pDrawList->AddRect(s.lastHitRect.Min, s.lastHitRect.Max, kHoverBorder, kHoverRounding, 0, 1.0f);
-            }
-        }
-        pDrawList->ChannelsSetCurrent(GC_Content);
-    }
+    // BeginSlot/EndSlot is fully capture-only : ImNodal paints NOTHING for
+    // the slot here. The host (typically inside its slot draw routine) is
+    // responsible for the dot, the hover halo, the connected indicator, etc.
+    // Hosts can read IsSlotHovered + GetSlotHitRect / GetSlotScreenPos.
+    // The frameSlotOrder loop is gone but the per-frame `connected` flag is
+    // still updated by Link() calls earlier in the frame.
 
     // Merge channels back into the canvas-expected channel order.
     if (rGraph.splitterActive) {
@@ -1676,9 +1656,9 @@ IMNODAL_API bool BeginNode(Id aNodeId, ImVec2* apPos, const NodeSettings& arSett
     NodeState& rNode = rCtx.nodes[aNodeId];
     rNode.graphId = rCtx.currentGraphId;
     rNode.settings = arSettings;
-    rNode.hasHeader = false;
-    rNode.bodyColumnOpened = false;
     rNode.isReroute = false;  // BeginRerouteNode re-set this AFTER BeginNode if needed
+    rNode.currentMaxToplevelNatWidth = 0.0f;
+    rNode.currentMaxToplevelNatHeight = 0.0f;
     rNode.rerouteSlotId = 0;
     rNode.userPosPtr = apPos;
 
@@ -1706,7 +1686,10 @@ IMNODAL_API bool BeginNode(Id aNodeId, ImVec2* apPos, const NodeSettings& arSett
 IMNODAL_API void EndNode() {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.currentNodeId != 0 && "EndNode without matching BeginNode");
-    IM_ASSERT(rCtx.currentSection == Context::Section_None && "EndNode while a section is still open");
+    IM_ASSERT(rCtx.layoutStack.empty() && "EndNode while a BeginH/BeginV is still open");
+    // Defensive : drop any leftover container so the next frame doesn't
+    // inherit a corrupt stack even if assertions were compiled out.
+    rCtx.layoutStack.clear();
 
     NodeState& rNode = rCtx.nodes[rCtx.currentNodeId];
     GraphState& rGraph = rCtx.graphs[rCtx.currentGraphId];
@@ -1722,6 +1705,9 @@ IMNODAL_API void EndNode() {
     const ImVec2 nodeMin(contentMin.x - pad, contentMin.y - pad);
     const ImVec2 nodeMax(contentMax.x + pad, contentMax.y + pad);
     rNode.size = nodeMax - nodeMin;
+    // Snapshot the running max for next frame's "fill parent" target.
+    rNode.lastFrameMaxToplevelNatWidth = rNode.currentMaxToplevelNatWidth;
+    rNode.lastFrameMaxToplevelNatHeight = rNode.currentMaxToplevelNatHeight;
 
     // Hover test : rect classique sauf pour les reroutes qui sont circulaires
     // -> distance au centre du dot, rayon legerement superieur a la zone visuelle.
@@ -1788,39 +1774,24 @@ IMNODAL_API void EndNode() {
         *rNode.userPosPtr = rNode.pos;
     }
 
-    // ---- Draw background + border on GC_Background (under content) ----
     auto* const pDrawList = rCtx.drawList;
-    s_setChannel(rCtx, GC_Background);
-
     const Style& s = rCtx.style;
     const float rounding = s.NodeRounding;
-    // Body fill — skipped for reroutes (host paints its own dot + ring).
+    // Body fill on BgFill (deepest node channel). The host can layer its own
+    // tint (header band, etc.) on UserBg ABOVE this and BELOW the border.
     if (!rNode.isReroute) {
+        s_setChannel(rCtx, GC_BgFill);
         pDrawList->AddRectFilled(nodeMin, nodeMax, s.Colors[ImNodalCol_NodeBody], rounding);
     }
-    // Header tint (if header was emitted)
-    if (rNode.hasHeader) {
-        ImRect hdr = rNode.headerScreenRect;
-        // Extend header visual to the full visual node width and up to the
-        // visible top edge (so the band touches the rounded corner).
-        hdr.Min.x = nodeMin.x;
-        hdr.Min.y = nodeMin.y;
-        hdr.Max.x = nodeMax.x;
-        pDrawList->AddRectFilled(hdr.Min, hdr.Max, s.Colors[ImNodalCol_NodeHeader], rounding, ImDrawFlags_RoundCornersTop);
-    }
-    // Border (selected color overrides). Reroute nodes skip the rectangular
-    // border : the host paints its own dot + selection ring around it (see
-    // BeginRerouteNode docs). We keep the body fill above invisible too by
-    // not drawing anything here for reroutes.
+    // Border + hover handle on BgBorder (above UserBg) so they stay visible
+    // on top of any host-drawn header/footer band.
     if (!rNode.isReroute) {
+        s_setChannel(rCtx, GC_BgBorder);
         const ImU32 borderCol = rNode.selected ? s.Colors[ImNodalCol_NodeBorderSelected] : s.Colors[ImNodalCol_NodeBorder];
         pDrawList->AddRect(nodeMin, nodeMax, borderCol, rounding, 0, s.NodeBorderThickness);
     }
-
-    // Hover-only drag handle bar — shown only when mouse is on the node.
-    // Used by reroute-style nodes that have no header: gives the user a visible
-    // grab surface to drag the node, appearing only when needed.
     if (rNode.settings.drawHoverHandle && rNode.hovered) {
+        s_setChannel(rCtx, GC_BgBorder);
         const float h = s.NodeHoverHandleHeight;
         const ImVec2 bMin(nodeMin.x + 2.0f, nodeMin.y + 1.0f);
         const ImVec2 bMax(nodeMax.x - 2.0f, nodeMin.y + 1.0f + h);
@@ -1838,170 +1809,178 @@ IMNODAL_API void EndNode() {
     rCtx.currentNodeId = 0;
 }
 
-// -----------------------------
-// Sections
-// -----------------------------
-IMNODAL_API bool BeginHeader() {
-    Context& rCtx = s_getCtx();
-    IM_ASSERT(rCtx.currentNodeId != 0 && "BeginHeader outside of BeginNode/EndNode");
-    IM_ASSERT(rCtx.currentSection == Context::Section_None && "BeginHeader while another section is still open");
-    rCtx.currentSection = Context::Section_Header;
-    ImGui::PushID("##imnodal_header");
-    ImGui::BeginGroup();
-    return true;
-}
-IMNODAL_API void EndHeader() {
-    Context& rCtx = s_getCtx();
-    IM_ASSERT(rCtx.currentSection == Context::Section_Header && "EndHeader without matching BeginHeader");
-    ImGui::EndGroup();
-    NodeState& rNode = rCtx.nodes[rCtx.currentNodeId];
-    rNode.hasHeader = true;
-    rNode.headerScreenRect = ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
-    ImGui::PopID();
-    rCtx.currentSection = Context::Section_None;
-}
+// =====================================================================
+// Layout primitives — BeginH/EndH/BeginV/EndV/Spring
+// =====================================================================
+namespace {
 
-// Helper: open body column — if another body column was already opened, emit SameLine first.
-static bool s_beginBodyColumn(Context& rCtx, Context::Section aSec, const char* aIdLabel) {
-    IM_ASSERT(rCtx.currentNodeId != 0 && "BeginInputs/Outputs/Center outside of BeginNode/EndNode");
-    IM_ASSERT(rCtx.currentSection == Context::Section_None && "BeginInputs/Outputs/Center while another section is still open");
-    NodeState& rNode = rCtx.nodes[rCtx.currentNodeId];
-    if (rNode.bodyColumnOpened) {
-        ImGui::SameLine(0.0f, rCtx.style.NodeColumnSpacing);
+// Resolve container target size from the user-supplied aSize :
+//   > 0 : use as-is.
+//   == 0 : natural (= sum of non-Spring children measured at last frame).
+//          Spring inside is a no-op since gap == 0.
+//   < 0 : fill parent. Parent target = the enclosing layout container if any,
+//         else the node body width/height (= node.size - 2 * NodeBodyPadding).
+inline ImVec2 s_resolveLayoutTarget(Context& arCtx, const ImVec2& aSize) {
+    ImVec2 target = aSize;
+    if (aSize.x >= 0.0f && aSize.y >= 0.0f) {
+        return target;
     }
-    rCtx.currentSection = aSec;
-    ImGui::PushID(aIdLabel);
-    ImGui::BeginGroup();
-    return true;
-}
-static void s_endBodyColumn(Context& rCtx, Context::Section aSec) {
-    IM_ASSERT(rCtx.currentSection == aSec && "EndInputs/Outputs/Center without matching Begin");
-    ImGui::EndGroup();
-    // Only flag the column as "opened" when something was actually emitted.
-    // Otherwise the next column would SameLine after an empty group and add
-    // NodeColumnSpacing px of dead space — visible as a wide empty area on
-    // nodes that only have outputs (or only inputs).
-    const ImVec2 itemSize = ImGui::GetItemRectSize();
-    ImGui::PopID();
-    if (itemSize.x > 0.0f) {
-        rCtx.nodes[rCtx.currentNodeId].bodyColumnOpened = true;
-    }
-    rCtx.currentSection = Context::Section_None;
-}
-
-IMNODAL_API bool BeginInputs() {
-    return s_beginBodyColumn(s_getCtx(), Context::Section_Inputs, "##imnodal_inputs");
-}
-IMNODAL_API void EndInputs() {
-    s_endBodyColumn(s_getCtx(), Context::Section_Inputs);
-}
-IMNODAL_API bool BeginCenter() {
-    return s_beginBodyColumn(s_getCtx(), Context::Section_Center, "##imnodal_center");
-}
-IMNODAL_API void EndCenter() {
-    s_endBodyColumn(s_getCtx(), Context::Section_Center);
-}
-IMNODAL_API bool BeginOutputs() {
-    return s_beginBodyColumn(s_getCtx(), Context::Section_Outputs, "##imnodal_outputs");
-}
-IMNODAL_API void EndOutputs() {
-    s_endBodyColumn(s_getCtx(), Context::Section_Outputs);
-}
-
-IMNODAL_API bool BeginFooter() {
-    Context& rCtx = s_getCtx();
-    IM_ASSERT(rCtx.currentNodeId != 0 && "BeginFooter outside of BeginNode/EndNode");
-    IM_ASSERT(rCtx.currentSection == Context::Section_None && "BeginFooter while another section is still open");
-    rCtx.currentSection = Context::Section_Footer;
-    ImGui::PushID("##imnodal_footer");
-    ImGui::BeginGroup();
-    return true;
-}
-IMNODAL_API void EndFooter() {
-    Context& rCtx = s_getCtx();
-    IM_ASSERT(rCtx.currentSection == Context::Section_Footer && "EndFooter without matching BeginFooter");
-    ImGui::EndGroup();
-    ImGui::PopID();
-    rCtx.currentSection = Context::Section_None;
-}
-
-// BeginAlign / EndAlign — layout container that horizontally aligns the
-// widgets emitted between them. Works in immediate mode by remembering the
-// group width measured on the previous frame and using it to compute this
-// frame's indent. The widgets themselves are real ImGui widgets — full
-// styling, hover and click semantics behave exactly as outside.
-IMNODAL_API void BeginAlign(float aRatio, float aAvailableWidth) {
-    Context& rCtx = s_getCtx();
-
-    // Stable per-call ID so the same BeginAlign call site finds its own
-    // measurement frame after frame even when there are several in a row.
-    rCtx.alignCallCounter++;
-    char buf[32];
-    ImFormatString(buf, sizeof(buf), "##imnodal_align_%d", rCtx.alignCallCounter);
-    ImGuiWindow* pWindow = ImGui::GetCurrentWindow();
-    const ImGuiID id = pWindow->GetID(buf);
-    rCtx.alignStack.push_back(id);
-
-    AlignSlot& rSlot = rCtx.alignSlots[id];
-
-    // Resolve the alignment width.
-    //
-    // Inside a node we want the CONTENT width — that is, the area in which
-    // user widgets actually live, NOT the visual rect (which extends outward
-    // by `bodyPadding` on each side). Reasons:
-    //   1) The cursor at BeginAlign sits at contentMin.x, and the visual rect
-    //      is symmetric around content (pad on each side). So content center
-    //      == visual center: centering against contentWidth at this cursor
-    //      lands the widget at the visual center too.
-    //   2) Using visualWidth instead would shift the widget right by `pad` for
-    //      ratio 0.5, and worse: when the alignment is the only contributor
-    //      to the node width (header-only node), the indent feeds back into
-    //      next frame's measured width and the node grows every frame until
-    //      it converges to a wrong steady state.
-    float availW = aAvailableWidth;
-    if (availW <= 0.0f) {
-        if (rCtx.currentNodeId != 0) {
-            auto it = rCtx.nodes.find(rCtx.currentNodeId);
-            if (it != rCtx.nodes.end() && it->second.size.x > 0.0f) {
-                availW = it->second.size.x - 2.0f * rCtx.style.NodeBodyPadding;
-                if (availW < 0.0f)
-                    availW = 0.0f;
-            }
+    // Compute parent target along axes that need filling.
+    ImVec2 parentTarget(0.0f, 0.0f);
+    if (!arCtx.layoutStack.empty()) {
+        parentTarget = arCtx.layoutStack.back().targetSize;
+    } else if (arCtx.currentNodeId != 0) {
+        // Top-level container of a node : reference is the max natural size
+        // of the OTHER top-level containers (header, footer…) measured at the
+        // previous frame. NOT node.size — using node.size would be circular
+        // (node.size depends on body width which depends on Spring fill which
+        // depends on target which depends on node.size), and that loop bakes
+        // the current padding into Spring fill so changing pad never resets
+        // the inter-slot gap.
+        auto it = arCtx.nodes.find(arCtx.currentNodeId);
+        if (it != arCtx.nodes.end()) {
+            parentTarget.x = it->second.lastFrameMaxToplevelNatWidth;
+            parentTarget.y = it->second.lastFrameMaxToplevelNatHeight;
         }
-        if (availW <= 0.0f)
-            availW = ImGui::GetContentRegionAvail().x;
     }
-
-    // First frame on this scope: lastWidth is 0 → no indent (left-aligned
-    // until next frame measures the actual content). Steady state: indent
-    // shifts the group so it lands at the requested ratio.
-    float indent = 0.0f;
-    if (rSlot.lastWidth > 0.0f && availW > rSlot.lastWidth) {
-        indent = aRatio * (availW - rSlot.lastWidth);
-    }
-    rSlot.appliedIndent = indent;
-    if (indent > 0.0f)
-        ImGui::Indent(indent);
-
-    // Push an ID so user widgets emitted inside the alignment scope don't
-    // collide with widgets sharing the same labels in sibling scopes.
-    ImGui::PushID(buf);
-    // Group everything user emits so we can read its bbox at EndAlign.
-    ImGui::BeginGroup();
+    if (aSize.x < 0.0f) target.x = parentTarget.x;
+    if (aSize.y < 0.0f) target.y = parentTarget.y;
+    return target;
 }
 
-IMNODAL_API void EndAlign() {
-    Context& rCtx = s_getCtx();
-    IM_ASSERT(!rCtx.alignStack.empty() && "EndAlign without matching BeginAlign");
-    const ImGuiID id = rCtx.alignStack.back();
-    rCtx.alignStack.pop_back();
+// Pre-position the cursor on the parent's row when the parent is horizontal
+// and we're about to start a non-first child. Increments the parent's child
+// counter so subsequent children also get a SameLine. No-op when there is no
+// parent or when the parent is vertical.
+inline void s_emitChildSameLineIfH(Context& arCtx) {
+    if (arCtx.layoutStack.empty()) {
+        return;
+    }
+    LayoutContainer& parent = arCtx.layoutStack.back();
+    if (parent.isHorizontal && parent.childCount > 0) {
+        ImGui::SameLine(0.0f, 0.0f);
+    }
+    parent.childCount++;
+}
+
+inline bool s_beginLayout(Context& arCtx, const char* aId, const ImVec2& aSize, bool aHorizontal) {
+    IM_ASSERT(arCtx.currentNodeId != 0 && "BeginH/V must be called inside BeginNode/EndNode");
+    IM_ASSERT(aId != nullptr && "BeginH/V: id must be non-null");
+
+    s_emitChildSameLineIfH(arCtx);
+
+    ImGuiWindow* const pWindow = ImGui::GetCurrentWindow();
+    const ImGuiID id = pWindow->GetID(aId);
+
+    LayoutContainer c;
+    c.id = id;
+    c.isHorizontal = aHorizontal;
+    c.startCursorScreen = ImGui::GetCursorScreenPos();
+    c.targetSize = s_resolveLayoutTarget(arCtx, aSize);
+    c.consumedAlongAxis = 0.0f;
+    c.springsTotalWeight = 0.0f;
+    c.childCount = 0;
+    arCtx.layoutStack.push_back(c);
+
+    ImGui::PushID(aId);
+    ImGui::BeginGroup();
+    return true;
+}
+
+inline void s_endLayout(Context& arCtx, bool aHorizontal) {
+    IM_ASSERT(!arCtx.layoutStack.empty() && "EndH/V without matching BeginH/V");
+    LayoutContainer c = arCtx.layoutStack.back();
+    IM_ASSERT(c.isHorizontal == aHorizontal && "EndH while a BeginV is open (or vice versa)");
+    arCtx.layoutStack.pop_back();
 
     ImGui::EndGroup();
     ImGui::PopID();
-    AlignSlot& rSlot = rCtx.alignSlots[id];
-    rSlot.lastWidth = ImGui::GetItemRectSize().x;
-    if (rSlot.appliedIndent > 0.0f)
-        ImGui::Unindent(rSlot.appliedIndent);
+
+    // total = naturals + spring fills emitted along the main axis.
+    // natural = total - consumed (= sum of non-spring children sizes).
+    LayoutSlot& s = arCtx.layoutSlots[c.id];
+    const ImVec2 total = ImGui::GetItemRectSize();
+    float natW, natH;
+    if (aHorizontal) {
+        natW = ImMax(0.0f, total.x - c.consumedAlongAxis);
+        natH = total.y;
+    } else {
+        natW = total.x;
+        natH = ImMax(0.0f, total.y - c.consumedAlongAxis);
+    }
+    s.lastNatWidth = natW;
+    s.lastNatHeight = natH;
+    // Snapshot the total Spring weight emitted this frame so next frame's
+    // Springs each take their proportional share of the gap.
+    s.lastSpringsTotalWeight = c.springsTotalWeight;
+
+    // Top-level container of the current node : feed our natural size to the
+    // node's running max, so sibling top-level containers can use it as their
+    // "fill parent" target on the NEXT frame. Decouples target from node.size
+    // (which is itself derived from this container's width with Spring fill,
+    // creating an auto-referential loop that bakes the current padding into
+    // the next frame's Spring fill).
+    if (arCtx.layoutStack.empty() && arCtx.currentNodeId != 0) {
+        NodeState& rNode = arCtx.nodes[arCtx.currentNodeId];
+        rNode.currentMaxToplevelNatWidth = ImMax(rNode.currentMaxToplevelNatWidth, natW);
+        rNode.currentMaxToplevelNatHeight = ImMax(rNode.currentMaxToplevelNatHeight, natH);
+    }
+}
+
+}  // namespace
+
+IMNODAL_API bool BeginH(const char* aId, const ImVec2& aSize) {
+    return s_beginLayout(s_getCtx(), aId, aSize, /*horizontal=*/true);
+}
+IMNODAL_API void EndH() {
+    s_endLayout(s_getCtx(), /*horizontal=*/true);
+}
+IMNODAL_API bool BeginV(const char* aId, const ImVec2& aSize) {
+    return s_beginLayout(s_getCtx(), aId, aSize, /*horizontal=*/false);
+}
+IMNODAL_API void EndV() {
+    s_endLayout(s_getCtx(), /*horizontal=*/false);
+}
+
+IMNODAL_API void Spring(float aWeight) {
+    Context& rCtx = s_getCtx();
+    IM_ASSERT(!rCtx.layoutStack.empty() && "Spring outside of BeginH/BeginV scope");
+    if (aWeight <= 0.0f) {
+        return;
+    }
+    s_emitChildSameLineIfH(rCtx);
+
+    LayoutContainer& c = rCtx.layoutStack.back();
+    LayoutSlot& s = rCtx.layoutSlots[c.id];
+
+    // Multi-Spring distribution : each Spring takes (gap * weight / totalWeight),
+    // where totalWeight is the sum of weights measured at the PREVIOUS frame.
+    // This breaks the divergence loop : with 2 Springs in a header (centering
+    // pattern), each takes half the gap so the total never exceeds target.
+    // First frame on this container : lastSpringsTotalWeight is 0 → fill 0
+    // (we don't know the total yet ; the container stays at natural width
+    // for the first frame, then Springs converge from frame 2).
+    const float target = c.isHorizontal ? c.targetSize.x : c.targetSize.y;
+    const float lastNat = c.isHorizontal ? s.lastNatWidth : s.lastNatHeight;
+    const float gap = ImMax(0.0f, target - lastNat);
+    const float fill = (s.lastSpringsTotalWeight > 0.0f) ? (gap * aWeight / s.lastSpringsTotalWeight) : 0.0f;
+
+    c.springsTotalWeight += aWeight;
+
+    // Always emit a Dummy (even with fill == 0) so CursorPosPrevLine points
+    // at the right spot for the next sibling's implicit SameLine. Without
+    // this, a 0-fill Spring still increments childCount and the next BeginV
+    // SameLine(0,0)s back to BEFORE the parent BeginH (= the previous line),
+    // which dumps the next sibling on top of the previous block.
+    if (c.isHorizontal) {
+        ImGui::Dummy(ImVec2(fill, 0.0f));
+        // Stay on the row so the next sibling lands at the right of us even
+        // if it doesn't go through s_emitChildSameLineIfH.
+        ImGui::SameLine(0.0f, 0.0f);
+    } else {
+        ImGui::Dummy(ImVec2(0.0f, fill));
+    }
+    c.consumedAlongAxis += fill;
 }
 
 // -----------------------------
@@ -2050,7 +2029,6 @@ IMNODAL_API void EndSlot() {
 
     SlotState& rSlot = rCtx.slots[rCtx.currentSlotId];
 
-    const bool isOutput = (rSlot.role == SlotRole_Output);
     const bool isInOut = (rSlot.role == SlotRole_InOut);
 
     // Empty-slot fallback : if the host emitted nothing between BeginSlot
@@ -2078,12 +2056,28 @@ IMNODAL_API void EndSlot() {
     const ImVec2 pivotMin = gMin + gSize * rCtx.slotAlignment;
     const ImVec2 pivotMax = pivotMin + rCtx.slotSize;
     rSlot.screenPos = (pivotMin + pivotMax) * 0.5f + rCtx.slotPivotOffset;
-    // Tangent comes from the role only (never from the pivot alignment).
-    // InOut keeps the (0,0) sentinel : link draw resolves the direction from
-    // the other endpoint.
-    if (isInOut)        rSlot.tangent = ImVec2(0.0f, 0.0f);
-    else if (isOutput)  rSlot.tangent = ImVec2(1.0f, 0.0f);
-    else                rSlot.tangent = ImVec2(-1.0f, 0.0f);
+    // Tangent derived from slotAlignment instead of role :
+    //   alignment.x near 0   -> tangent (-1, 0)   (left edge -> link goes left)
+    //   alignment.x near 1   -> tangent ( 1, 0)   (right edge -> link goes right)
+    //   alignment.y near 0   -> tangent ( 0, -1)  (top edge -> link goes up)
+    //   alignment.y near 1   -> tangent ( 0,  1)  (bottom edge -> link goes down)
+    //   centered             -> tangent ( 0,  0)  (resolved dynamically by Link)
+    // SlotRole_InOut also forces (0, 0) for backward-compat with reroute.
+    if (isInOut) {
+        rSlot.tangent = ImVec2(0.0f, 0.0f);
+    } else {
+        const float ax = rCtx.slotAlignment.x;
+        const float ay = rCtx.slotAlignment.y;
+        const float dx = ax - 0.5f;  // negative -> left, positive -> right
+        const float dy = ay - 0.5f;  // negative -> up,   positive -> down
+        if (std::fabs(dx) < 0.25f && std::fabs(dy) < 0.25f) {
+            rSlot.tangent = ImVec2(0.0f, 0.0f);  // centered -> dynamic
+        } else if (std::fabs(dx) >= std::fabs(dy)) {
+            rSlot.tangent = ImVec2(dx >= 0.0f ? 1.0f : -1.0f, 0.0f);
+        } else {
+            rSlot.tangent = ImVec2(0.0f, dy >= 0.0f ? 1.0f : -1.0f);
+        }
+    }
     // Reset pivot override for the next slot — back to thedmd defaults.
     rCtx.slotAlignment = ImVec2(0.5f, 0.5f);
     rCtx.slotSize = ImVec2(0.0f, 0.0f);
@@ -2178,6 +2172,11 @@ IMNODAL_API ImVec2 GetSlotTangent(Id aSlotId) {
     Context& rCtx = s_getCtx();
     auto it = rCtx.slots.find(aSlotId);
     return (it != rCtx.slots.end()) ? it->second.tangent : ImVec2(1.0f, 0.0f);
+}
+IMNODAL_API ImRect GetSlotHitRect(Id aSlotId) {
+    Context& rCtx = s_getCtx();
+    auto it = rCtx.slots.find(aSlotId);
+    return (it != rCtx.slots.end()) ? it->second.lastHitRect : ImRect();
 }
 IMNODAL_API bool IsSlotHovered(Id aSlotId) {
     Context& rCtx = s_getCtx();
@@ -2485,7 +2484,11 @@ IMNODAL_API bool BeginConnectionCreate() {
     // True only when a drag is active AND it originated from the currently
     // open scope (graph or standalone). Without this check, a drag started in
     // one scope would trigger query/commit in every other scope too.
-    return s_isDragInCurrentScope(rCtx);
+    bool ret = s_isDragInCurrentScope(rCtx);
+    return ret;
+}
+IMNODAL_API Id GetDraggingFromSlot() {
+    return s_getCtx().draggingFromSlot;
 }
 IMNODAL_API bool QueryNewLink(Id* apoFromSlotId, Id* apoToSlotId) {
     Context& rCtx = s_getCtx();

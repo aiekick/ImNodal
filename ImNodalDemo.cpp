@@ -261,32 +261,58 @@ inline void DemoDrawGraph(DemoState& st) {
     GraphSettings gs;
     if (BeginGraph(0xDEADBEEFull, gs)) {
         // -- Nodes --
+        // Layout assemble manuellement avec BeginH/BeginV/Spring : header
+        // centre via Spring/Text/Spring, body en H avec inputs|center|outputs
+        // chacun en V, Springs entre eux pour distribuer l'espace.
         for (auto& n : st.nodes) {
-            PushStyleColor(ImNodalCol_NodeHeader, n.headerCol);
             NodeSettings ns;
             if (BeginNode(n.id, &n.pos, ns)) {
-                if (BeginHeader()) {
-                    BeginAlign(0.5f);
+                ImVec2 headerMin, headerMax;
+                BeginH("##header");
+                    Spring();
                     ImGui::TextUnformatted(n.title);
-                    EndAlign();
-                    EndHeader();
-                }
-                if (BeginInputs()) {
-                    for (auto& s : n.inputs) DemoEmitSlot(SlotRole_Input, s);
-                    EndInputs();
-                }
-                if (BeginCenter()) {
-                    ImGui::SetNextItemWidth(80);
-                    ImGui::SliderFloat("##v", &n.bodyValue, 0.0f, 1.0f);
-                    EndCenter();
-                }
-                if (BeginOutputs()) {
-                    for (auto& s : n.outputs) DemoEmitSlot(SlotRole_Output, s);
-                    EndOutputs();
-                }
+                    Spring();
+                EndH();
+                headerMin = ImGui::GetItemRectMin();
+                headerMax = ImGui::GetItemRectMax();
+
+                BeginH("##body");
+                    if (!n.inputs.empty()) {
+                        BeginV("##in");
+                            for (auto& s : n.inputs) DemoEmitSlot(SlotRole_Input, s);
+                        EndV();
+                    }
+                    Spring();
+                    BeginV("##center");
+                        ImGui::SetNextItemWidth(80);
+                        ImGui::SliderFloat("##v", &n.bodyValue, 0.0f, 1.0f);
+                    EndV();
+                    Spring();
+                    if (!n.outputs.empty()) {
+                        BeginV("##out");
+                            for (auto& s : n.outputs) DemoEmitSlot(SlotRole_Output, s);
+                        EndV();
+                    }
+                EndH();
                 EndNode();
+
+                // Host-side header band tint : ImNodal n'a plus de header tint.
+                // On peint un AddRectFilled coloré sur la bande supérieure du
+                // node via le background draw list, en utilisant le node rect
+                // (last frame) pour la largeur et headerMax.y pour la hauteur.
+                if (ImGui::IsItemVisible() && headerMax.y > headerMin.y) {
+                    const ImRect nodeRect = GetNodeRect(n.id);
+                    if (nodeRect.GetWidth() > 0.0f) {
+                        if (auto* bgList = GetNodeBackgroundDrawList(n.id)) {
+                            const float rounding = GetStyleVarFloat(ImNodalStyleVar_NodeRounding);
+                            bgList->AddRectFilled(
+                                ImVec2(nodeRect.Min.x, nodeRect.Min.y),
+                                ImVec2(nodeRect.Max.x, headerMax.y),
+                                n.headerCol, rounding, ImDrawFlags_RoundCornersTop);
+                        }
+                    }
+                }
             }
-            PopStyleColor();
         }
         // -- Reroutes --
         // BeginRerouteNode is capture-only too : we paint dot + ring ourselves.
@@ -305,12 +331,12 @@ inline void DemoDrawGraph(DemoState& st) {
         // -- Links --
         for (auto& l : st.links) {
             Link(l.id, l.fromSlot, l.toSlot, l.color, 3.0f);
-            if (l.flow) FlowLink(l.id, 180.0f, 0);
+            if (l.flow) FlowLink(l.id, 1.0f, 0);
         }
 
         // -- Connection create --
         if (BeginConnectionCreate()) {
-            Id from = 0, to = 0;
+            Id from, to = 0;
             if (QueryNewLink(&from, &to)) {
                 const SlotRole rf = GetSlotRole(from);
                 const SlotRole rt = GetSlotRole(to);
