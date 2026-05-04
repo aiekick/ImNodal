@@ -641,7 +641,10 @@ static void s_leaveLocalSpace(Context& arCtx) {
 static void s_managePan(Context& arCtx) {
     const auto btn = arCtx.settings.panButton;
 
-    if ((arCtx.isPanning || ImGui::IsWindowHovered()) && ImGui::IsMouseDragging(btn, 0.0f)) {
+    // arCtx.hovered = strict canvas gate (set at BeginCanvas). Once panning
+    // is engaged, the drag continues even if the mouse leaves the canvas
+    // (normal UX) — the second branch handles release.
+    if ((arCtx.isPanning || arCtx.hovered) && ImGui::IsMouseDragging(btn, 0.0f)) {
         if (!arCtx.isPanning) {
             arCtx.isPanning = true;
             arCtx.panStartOrigin = arCtx.origin;
@@ -687,7 +690,9 @@ static void s_manageInteractions(Context& arCtx) {
     // their Begin/End scope. Resetting them at Begin would create a window
     // where End sets the flag and the next Begin immediately clears it before
     // user code gets a chance to read it.
-    if (!ImGui::IsWindowHovered()) {
+    // Canvas-hovered gate : zoom/pan only fire when the mouse is on THIS
+    // canvas (not on a sibling panel, another window, or another canvas).
+    if (!arCtx.hovered) {
         return;
     }
     s_manageZoom(arCtx);
@@ -1063,9 +1068,17 @@ IMNODAL_API bool BeginCanvas(const char* aId, const ImVec2& aSize, const CanvasS
     // while clicks/drags inside the canvas never start a window move.
     // ImGui's window-move decision runs at EndFrame and reads the current
     // flags, so setting it here takes effect on this frame's mouse-press.
-    if (ImGui::IsMouseHoveringRect(rCtx.widgetPos, rCtx.widgetPos + rCtx.widgetSize)) {
+    const bool mouseInWidget = ImGui::IsMouseHoveringRect(rCtx.widgetPos, rCtx.widgetPos + rCtx.widgetSize);
+    if (mouseInWidget) {
         ImGui::GetCurrentWindow()->Flags |= ImGuiWindowFlags_NoMove;
     }
+
+    // Compute canvas-hovered EARLY so it's available throughout the scope
+    // (s_manageInteractions, BeginNode, BeginSlot, LinkLineSegment, ...).
+    // Strict gate : ImGui window currently hovered AND mouse is geometrically
+    // inside our widget rect. Without this, interactions of one canvas would
+    // fire on top of another canvas / a side panel / another window.
+    rCtx.hovered = ImGui::IsWindowHovered() && mouseInWidget;
 
     s_saveInputState(rCtx);
     s_saveViewportState(rCtx);
@@ -1103,9 +1116,10 @@ IMNODAL_API void EndCanvas() {
     s_leaveLocalSpace(rCtx);
     ImGui::GetCurrentWindow()->DC.CursorMaxPos = rCtx.windowCursorMaxBackup;
 
-    // Background interaction flags: computed now that mouse is back in screen
-    // space, all user items are emitted, and our own layout Dummy is not yet.
-    rCtx.hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(rCtx.widgetRect.Min, rCtx.widgetRect.Max);
+    // Background interaction flags: rCtx.hovered was set early at BeginCanvas
+    // (strict canvas-hovered gate, used by all interactions inside the scope).
+    // We re-read it here for the bg-click logic — value is stable across the
+    // frame since neither IsWindowHovered nor mouse pos changes in between.
     // "onEmpty" = vraiment sur du fond : pas d'item ImGui hovered (couvre
     // nodes/slots qui ont des ItemAdd) ET pas de LIEN hovered (les liens
     // sont dessines via DrawList sans ItemAdd, donc IsAnyItemHovered les
@@ -1538,7 +1552,9 @@ IMNODAL_API void EndGraph() {
     const bool lmbClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
     const bool lmbDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
     const bool lmbReleased = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
-    const bool lmbOnCanvas = ImGui::IsWindowHovered() && rCtx.widgetRect.Contains(rCtx.mousePosBackup);
+    // Equivalent to rCtx.hovered (set at BeginCanvas) — kept as a local for
+    // readability of the box-select state machine below.
+    const bool lmbOnCanvas = rCtx.hovered;
     const ImVec2 mouseLocal = ImGui::GetIO().MousePos;
 
     // Phase 1: arm a pending bg-click on empty-canvas mouse-down. On stocke
@@ -1730,6 +1746,9 @@ IMNODAL_API void EndNode() {
 
     // Hover test : rect classique sauf pour les reroutes qui sont circulaires
     // -> distance au centre du dot, rayon legerement superieur a la zone visuelle.
+    // Canvas-hovered gate : a node never registers as hovered when the mouse
+    // sits on a side panel, another window or another canvas — even if its
+    // screen rect happens to cover the cursor position there.
     if (rNode.isReroute) {
         auto sIt = rCtx.slots.find(rNode.rerouteSlotId);
         const ImVec2 center =
@@ -1739,9 +1758,9 @@ IMNODAL_API void EndNode() {
         const ImVec2 mp = ImGui::GetIO().MousePos;
         const float dx = mp.x - center.x;
         const float dy = mp.y - center.y;
-        rNode.hovered = (dx * dx + dy * dy <= hitR * hitR) && ImGui::IsWindowHovered();
+        rNode.hovered = (dx * dx + dy * dy <= hitR * hitR) && rCtx.hovered;
     } else {
-        rNode.hovered = ImGui::IsMouseHoveringRect(nodeMin, nodeMax) && ImGui::IsWindowHovered();
+        rNode.hovered = ImGui::IsMouseHoveringRect(nodeMin, nodeMax) && rCtx.hovered;
     }
     if (rNode.hovered) {
         rCtx.currentHoveredNode = rCtx.currentNodeId;
@@ -2021,9 +2040,13 @@ IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const SlotSettings& arSet
     // EndSlot, so they'd always read false. Using last frame's rect introduces
     // a 1-frame lag that's invisible for stable layouts (which is the common
     // case). EndSlot will refine the value with this frame's actual rect.
+    // Canvas-hovered gate : when inside a canvas, only hit-test if the mouse
+    // is actually on this canvas. Outside a canvas (e.g. slot anatomy demo
+    // emitted directly in a window), no gating — geometry alone decides.
     {
         const ImRect& r = rSlot.lastHitRect;
-        if (r.Min.x < r.Max.x && r.Min.y < r.Max.y) {
+        const bool gateOK = (!rCtx.active) || rCtx.hovered;
+        if (gateOK && r.Min.x < r.Max.x && r.Min.y < r.Max.y) {
             const ImVec2 mp = ImGui::GetIO().MousePos;
             rSlot.hovered = (mp.x >= r.Min.x && mp.x <= r.Max.x && mp.y >= r.Min.y && mp.y <= r.Max.y);
         } else {
@@ -2141,7 +2164,11 @@ IMNODAL_API void EndSlot() {
     // ButtonBehavior on slot B reports hovered=false (ActiveId gating).
     // The raw test bypasses that so the target dot still highlights and
     // currentHoveredSlot tracks correctly for link-target detection.
-    const bool mouseOnSlot = ImGui::IsMouseHoveringRect(hitBB.Min, hitBB.Max, false);
+    // Canvas-hovered gate : same rule as BeginSlot above — only gate when
+    // we're actually inside a canvas scope (anatomy outside canvas keeps
+    // its geometric-only behavior).
+    const bool gateOK = (!rCtx.active) || rCtx.hovered;
+    const bool mouseOnSlot = gateOK && ImGui::IsMouseHoveringRect(hitBB.Min, hitBB.Max, false);
     rSlot.hovered = btnHovered || mouseOnSlot;
     if (mouseOnSlot) {
         rCtx.currentHoveredSlot = rCtx.currentSlotId;
@@ -2473,6 +2500,13 @@ IMNODAL_API void LinkLineSegment(const ImVec2& aP0, const ImVec2& aP1) {
         rLink.cachedPath.push_back(aP0);
     rLink.cachedPath.push_back(aP1);
 
+    // Canvas-hovered gate : a link never registers as hovered when the mouse
+    // sits on a side panel, another window or another canvas — even if its
+    // canvas-space coordinates happen to align with the cursor through pan/zoom.
+    // Outside a canvas (rare standalone use), no gating.
+    const bool gateOK = (!rCtx.active) || rCtx.hovered;
+    if (!gateOK)
+        return;
     const float d2 = s_pointToSegmentDistanceSq(ImGui::GetIO().MousePos, aP0, aP1);
     const float thr = rCtx.currentLinkHitThreshold;
     if (d2 <= thr * thr)
