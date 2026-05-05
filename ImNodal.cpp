@@ -378,8 +378,8 @@ struct Context {
     // when inside BeginCanvas) — same space used by node lastNodeRect and
     // link cached endpoints.
     bool pendingBgClick{false};
-    ImVec2 pendingBgClickPos{};        // local-space (au moment du clic)
-    ImVec2 pendingBgClickPosScreen{};  // screen-space (pour le seuil de drag)
+    ImVec2 pendingBgClickPos{};        // local-space (at the moment of the click)
+    ImVec2 pendingBgClickPosScreen{};  // screen-space (for the drag threshold)
     bool boxSelectActive{false};
     Id boxSelectGraphId{0};
     ImVec2 boxSelectStart{};  // local-space
@@ -1158,11 +1158,11 @@ IMNODAL_API void EndCanvas() {
     // (strict canvas-hovered gate, used by all interactions inside the scope).
     // We re-read it here for the bg-click logic — value is stable across the
     // frame since neither IsWindowHovered nor mouse pos changes in between.
-    // "onEmpty" = vraiment sur du fond : pas d'item ImGui hovered (couvre
-    // nodes/slots qui ont des ItemAdd) ET pas de LIEN hovered (les liens
-    // sont dessines via DrawList sans ItemAdd, donc IsAnyItemHovered les
-    // ignore — sans ce check, double-cliquer sur un lien ferait aussi fire
-    // bgDoubleClicked et declencherait l'action "fit-to-view" du host).
+    // "onEmpty" = truly on the background : no hovered ImGui item (covers
+    // nodes/slots that emit ItemAdd) AND no hovered LINK (links are drawn
+    // through DrawList without ItemAdd, so IsAnyItemHovered ignores them —
+    // without this check, double-clicking a link would also fire
+    // bgDoubleClicked and trigger the host's "fit-to-view" action).
     const bool onEmpty = rCtx.hovered && !ImGui::IsAnyItemHovered() && rCtx.currentHoveredLink == 0 && !rCtx.isPanning;
     if (onEmpty) {
         rCtx.bgClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
@@ -1595,13 +1595,13 @@ IMNODAL_API void EndGraph() {
     const bool lmbOnCanvas = rCtx.hovered;
     const ImVec2 mouseLocal = ImGui::GetIO().MousePos;
 
-    // Phase 1: arm a pending bg-click on empty-canvas mouse-down. On stocke
-    // la position en LOCAL-SPACE (pour le rendu de la box) ET en SCREEN-SPACE
-    // (pour le seuil de drag — immune aux pan/zoom du canvas qui peuvent
-    // intervenir entre le clic et le check, par exemple si le double-clic
-    // declenche un fit-to-view : le canvas-space mouse "saute" alors que la
-    // souris ecran n'a pas bouge ; on ne veut pas armer un box-select pour
-    // ce mouvement parasite).
+    // Phase 1: arm a pending bg-click on empty-canvas mouse-down. We store
+    // the position in LOCAL-SPACE (for box rendering) AND in SCREEN-SPACE
+    // (for the drag threshold — immune to pan/zoom of the canvas that may
+    // happen between the click and the check, e.g. if the double-click
+    // triggers a fit-to-view : the canvas-space mouse "jumps" while the
+    // screen mouse hasn't moved ; we don't want to arm a box-select for
+    // that spurious motion).
     if (lmbClicked && lmbOnCanvas && !rGraph.clickConsumedThisFrame && !rCtx.isPanning) {
         rCtx.pendingBgClick = true;
         rCtx.pendingBgClickPos = mouseLocal;
@@ -1609,18 +1609,18 @@ IMNODAL_API void EndGraph() {
     }
 
     // Phase 2: promote pending click to box-select once drag distance crosses
-    // the threshold. On compare en SCREEN-SPACE (mousePosBackup vs la position
-    // screen au clic) ; le seuil est en pixels ecran sans dependre du zoom.
+    // the threshold. We compare in SCREEN-SPACE (mousePosBackup vs the screen
+    // click position) ; the threshold is in screen pixels, independent of zoom.
     if (rCtx.pendingBgClick && lmbDown && !rCtx.boxSelectActive && rGraph.settings.allowBoxSelect) {
         const ImVec2 d = rCtx.mousePosBackup - rCtx.pendingBgClickPosScreen;
         constexpr float kThreshold = 4.0f;  // screen-pixels
         if ((d.x * d.x + d.y * d.y) > (kThreshold * kThreshold)) {
             rCtx.boxSelectActive = true;
             rCtx.boxSelectGraphId = rGraph.id;
-            // Le start de la box doit etre en CANVAS-SPACE actuel : on
-            // re-projette la position screen au clic via la transform
-            // courante (qui peut avoir change si le canvas a zoome entre
-            // temps — sinon equivalent a pendingBgClickPos).
+            // The box start must be in CURRENT CANVAS-SPACE : we re-project
+            // the screen click position through the current transform (which
+            // may have changed if the canvas was zoomed in the meantime —
+            // otherwise equivalent to pendingBgClickPos).
             rCtx.boxSelectStart = (rCtx.pendingBgClickPosScreen - rCtx.viewTransformPos) * rCtx.invScale;
         }
     }
@@ -1645,9 +1645,9 @@ IMNODAL_API void EndGraph() {
             if (!toggle)
                 s_clearSelection(rGraph);
 
-            // Nodes : selectionnes des que leur rect VISUEL intersecte le box
-            // (overlap AABB-AABB). Plus tolerant que "centre dans le box" :
-            // un coin du node qui touche le box suffit.
+            // Nodes : selected as soon as their VISUAL rect intersects the box
+            // (AABB-AABB overlap). More forgiving than "center inside the box" :
+            // a single corner of the node touching the box is enough.
             for (const auto& kv : rCtx.nodes) {
                 if (kv.second.graphId != rGraph.id)
                     continue;
@@ -1662,10 +1662,10 @@ IMNODAL_API void EndGraph() {
                     }
                 }
             }
-            // Links : selectionnes des que le path emis par les primitives
-            // touche le box, meme partiellement. On teste chord-vs-rect sur
-            // chaque segment du polyline — un seul "frolement" suffit. Marche
-            // pour bezier, Manhattan, et toutes les formes custom.
+            // Links : selected as soon as the path emitted by the primitives
+            // touches the box, even partially. We test chord-vs-rect on each
+            // polyline segment — a single grazing intersection is enough.
+            // Works for bezier, Manhattan, and any custom shape.
             for (const auto& kv : rCtx.links) {
                 if (kv.second.graphId != rGraph.id)
                     continue;
@@ -1783,8 +1783,8 @@ IMNODAL_API void EndNode() {
     rNode.lastFrameMaxToplevelNatWidth = rNode.currentMaxToplevelNatWidth;
     rNode.lastFrameMaxToplevelNatHeight = rNode.currentMaxToplevelNatHeight;
 
-    // Hover test : rect classique sauf pour les reroutes qui sont circulaires
-    // -> distance au centre du dot, rayon legerement superieur a la zone visuelle.
+    // Hover test : standard rect except for reroutes which are circular
+    // -> distance to the dot center, radius slightly larger than the visual area.
     // Canvas-hovered gate : a node never registers as hovered when the mouse
     // sits on a side panel, another window or another canvas — even if its
     // screen rect happens to cover the cursor position there.
@@ -2425,11 +2425,11 @@ inline void s_bezierCtrl(const ImVec2& aFrom, const ImVec2& aFromTangent, const 
 // computed dynamically from the direction toward the other endpoint.
 static ImVec2 s_resolveTangent(const SlotState& arSlot, const ImVec2& aOtherPos) {
     if (arSlot.tangent.x == 0.0f && arSlot.tangent.y == 0.0f) {
-        // InOut sentinel : on adopte une tangente HORIZONTALE pure, signe
-        // donne par la direction de l'autre extremite. C'est ce qui fait que
-        // les splines passant par un reroute conservent l'allure des wires
-        // standard (Input -> tangente -1,0 ; Output -> +1,0) au lieu de
-        // pointer en biais quand le reroute est decale verticalement.
+        // InOut sentinel : we adopt a pure HORIZONTAL tangent, with sign
+        // determined by the direction toward the other endpoint. This is
+        // what makes splines passing through a reroute keep the look of
+        // standard wires (Input -> tangent -1,0 ; Output -> +1,0) instead
+        // of pointing diagonally when the reroute is vertically offset.
         const float dx = aOtherPos.x - arSlot.screenPos.x;
         return ImVec2(dx >= 0.0f ? 1.0f : -1.0f, 0.0f);
     }
@@ -2452,7 +2452,7 @@ static void s_drawBezierLink(
 }  // namespace
 
 // =====================================================================
-// Custom links — primitives bas niveau (dessin + hit-test combines)
+// Custom links — low-level primitives (drawing + hit-test combined)
 // =====================================================================
 
 IMNODAL_API bool BeginLink(Id aLinkId, Id aFromSlotId, Id aToSlotId, float aThickness, ImU32 aColor) {
@@ -2598,11 +2598,11 @@ IMNODAL_API void EndLink() {
     rLink.hovered = rCtx.currentLinkHovered;
     rLink.pathCached = !rLink.cachedPath.empty();
 
-    // NB : on NE reset PAS clicked / doubleClicked ici. NewFrame s'en charge
-    // au debut de chaque frame. Si plusieurs Link() sont appeles avec le meme
-    // id (= fusion visuelle), le PREMIER appel detecte le clic et le set a
-    // true ; les suivants ne re-entrent pas dans canConsume (clickConsumed
-    // est deja a true) et ecraseraient l'etat a false si on resetait ici.
+    // NB : we do NOT reset clicked / doubleClicked here. NewFrame handles
+    // that at the start of every frame. If several Link() calls share the
+    // same id (= visual merging), the FIRST call detects the click and sets
+    // it to true ; subsequent calls don't re-enter canConsume (clickConsumed
+    // is already true) and would overwrite the state to false if we reset here.
     if (rLink.hovered) {
         rCtx.currentHoveredLink = linkId;
     }
@@ -2995,13 +2995,13 @@ IMNODAL_API bool BeginDelete() {
 
     const bool ctrl = ImGui::IsKeyDown(ImGuiMod_Ctrl) || ImGui::IsKeyDown(ImGuiMod_Super);
     const bool ctrlX = ctrl && ImGui::IsKeyPressed(ImGuiKey_X, false);
-    // repeat=false : on ne veut PAS que delete fire 10x si l'utilisateur tient
-    // la touche enfoncee. Une seule deletion par appui.
+    // repeat=false : we do NOT want delete to fire 10x if the user holds
+    // the key down. A single deletion per press.
     const bool deletePressed = ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false) || ctrlX;
     const bool canvasHovered = rCtx.hovered;  // computed by EndCanvas of last frame
-    // WantCaptureKeyboard : un widget ImGui (text input ailleurs, etc.) capte
-    // le clavier. Backspace tape la-bas ne doit pas faire deleter notre
-    // selection canvas — meme si la souris survole le canvas par hasard.
+    // WantCaptureKeyboard : an ImGui widget (text input elsewhere, etc.) has
+    // captured the keyboard. A Backspace typed there must not delete our
+    // canvas selection — even if the mouse happens to hover the canvas.
     const bool kbCaptured = ImGui::GetIO().WantCaptureKeyboard;
     if (deletePressed && canvasHovered && !kbCaptured) {
         for (Id id : g.selectedLinks)
