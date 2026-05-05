@@ -46,6 +46,7 @@ struct SlotState {
     Id graphId{0};     // 0 = standalone (outside any BeginGraph)
     SlotRole role{SlotRole_Input};
     uint32_t typeTag{0};
+    ImNodalSlotFlags flags{ImNodalSlotFlags_None};  // snapshot of SlotSettings::flags
     // Pivot point at which links anchor on this slot. Computed at EndSlot
     // from the group rect + role (or pivot override). Hosts that draw their
     // own dot should draw it at this position so the visible dot matches
@@ -57,6 +58,12 @@ struct SlotState {
     // BeginSlot and EndSlot — typically where the host queries double-clicks)
     // and by EndGraph to draw the interaction hover frame around the slot.
     ImRect lastHitRect{};
+    // Custom hitbox set by SetSlotHitbox between Begin/EndSlot. type==None
+    // means "use lastHitRect for hover/click tests" (default rectangular
+    // behavior). Otherwise the shape drives hit-tests; lastHitRect still
+    // holds the AABB (used for ImGui::ItemAdd / culling and the EndGraph
+    // hover frame).
+    ImNodalHitbox customHitbox{};
     bool hovered{false};
     bool ctxMenuRequested{false};  // set by EndSlot when right-clicked
     bool connected{false};         // set by M2
@@ -74,11 +81,10 @@ struct NodeState {
     NodeSettings settings;
     // Last frame's screen-space rect (for GetNodeRect / per-node drawlists)
     ImRect lastScreenRect{};
-    // Reroute marker: set by BeginRerouteNode. Switches the visual treatment
-    // (no body fill, no border) — the host paints its own dot + ring.
-    bool isReroute{false};
-    Id rerouteSlotId{0};             // valid only when isReroute (used to find dot center)
-    float rerouteHitRadius{0.0f};    // circular hit radius used for the reroute slot (host-supplied)
+    // Custom node hitbox set by SetNodeHitbox between Begin/EndNode. type==None
+    // means "use the rectangular nodeMin/nodeMax for hover/click tests" (the
+    // legacy behavior). Otherwise the shape drives hit-tests.
+    ImNodalHitbox customHitbox{};
     // Max natural width/height of all TOP-LEVEL BeginH/V containers emitted
     // inside this node. Used by "fill parent" mode of subsequent toplevel
     // containers to size against their siblings rather than against
@@ -172,6 +178,13 @@ struct GraphState {
     // EndGraph reads this to decide whether a left click on empty space should
     // clear selection.
     bool clickConsumedThisFrame{false};
+    // Snapshot taken when the box-select becomes active. Live mode rebuilds
+    // the selection every frame as (snapshot ∪ overlapping items), so the
+    // multi-select modifier acts as "additive" against this fixed base —
+    // dragging the box does not erase pre-existing selections.
+    std::unordered_set<Id> boxSelectBaseNodes;
+    std::unordered_set<Id> boxSelectBaseLinks;
+    bool boxSelectBaseCaptured{false};
 };
 
 // =====================================================================
@@ -357,6 +370,12 @@ struct Context {
     ImVec2 slotSize{0.0f, 0.0f};        // zero -> pivot is a point
     ImVec2 slotPivotOffset{0.0f, 0.0f}; // extra px offset added to screenPos
 
+    // Staging hitboxes filled by SetSlotHitbox / SetNodeHitbox between
+    // Begin* and End*. Read + applied at End* into the matching state, then
+    // reset to "no override" so the next slot/node starts fresh.
+    ImNodalHitbox stagingSlotHitbox{};
+    ImNodalHitbox stagingNodeHitbox{};
+
     // -----------------------------
     // BeginH/V/Spring layout primitives
     // -----------------------------
@@ -442,6 +461,11 @@ static void s_doNewFrame(Context& arCtx) {
     arCtx.slotAlignment = ImVec2(0.5f, 0.5f);
     arCtx.slotSize = ImVec2(0.0f, 0.0f);
     arCtx.slotPivotOffset = ImVec2(0.0f, 0.0f);
+
+    // Drop any staging hitbox a host forgot to consume by closing its
+    // matching Begin/End scope last frame. ImNodalHitbox{} == None.
+    arCtx.stagingSlotHitbox = ImNodalHitbox{};
+    arCtx.stagingNodeHitbox = ImNodalHitbox{};
 
     // Layout primitive : drop any leftover container from a previous frame
     // where the host forgot an EndH/EndV. Persistent layoutSlots survive.
@@ -730,14 +754,9 @@ Style::Style() {
     Colors[ImNodalCol_NodeBorder] = IM_COL32(80, 80, 80, 255);
     Colors[ImNodalCol_NodeBorderSelected] = IM_COL32(255, 180, 0, 255);
     Colors[ImNodalCol_NodeHoverHandle] = IM_COL32(255, 255, 255, 120);
-    Colors[ImNodalCol_SlotDot] = IM_COL32(200, 200, 200, 255);
-    Colors[ImNodalCol_SlotDotConnected] = IM_COL32(255, 220, 0, 255);
-    Colors[ImNodalCol_SlotDotHovered] = IM_COL32(255, 255, 255, 255);
     Colors[ImNodalCol_Link] = IM_COL32(220, 220, 220, 230);
     Colors[ImNodalCol_LinkHovered] = IM_COL32(255, 255, 255, 240);
     Colors[ImNodalCol_LinkSelected] = IM_COL32(255, 180, 0, 230);
-    Colors[ImNodalCol_RerouteBorder] = IM_COL32(220, 220, 220, 70);
-    Colors[ImNodalCol_RerouteBorderSelected] = IM_COL32(255, 180, 0, 200);
     Colors[ImNodalCol_BoxSelectFill] = IM_COL32(120, 200, 255, 40);
     Colors[ImNodalCol_BoxSelectBorder] = IM_COL32(120, 200, 255, 200);
     Colors[ImNodalCol_LinkPreviewIdle] = IM_COL32(220, 220, 220, 200);
@@ -753,7 +772,6 @@ Style::Style() {
     NodeBorderThickness = 1.5f;
     NodeBodyPadding = 6.0f;
     NodeHoverHandleHeight = 4.0f;
-    SlotDotRadius = 5.0f;
     SlotMinSize = ImVec2(12.0f, 12.0f);
     LinkThickness = 3.0f;
     GridSize = ImVec2(50.0f, 50.0f);
@@ -777,7 +795,6 @@ IMNODAL_API float GetStyleVarFloat(ImNodalStyleVar aIdx) {
         case ImNodalStyleVar_NodeBorderThickness: return s.NodeBorderThickness;
         case ImNodalStyleVar_NodeBodyPadding: return s.NodeBodyPadding;
         case ImNodalStyleVar_NodeHoverHandleHeight: return s.NodeHoverHandleHeight;
-        case ImNodalStyleVar_SlotDotRadius: return s.SlotDotRadius;
         case ImNodalStyleVar_LinkThickness: return s.LinkThickness;
         default: return 0.0f;
     }
@@ -820,7 +837,6 @@ inline float* s_styleVarFloatPtr(Style& s, ImNodalStyleVar aIdx) {
         case ImNodalStyleVar_NodeBorderThickness: return &s.NodeBorderThickness;
         case ImNodalStyleVar_NodeBodyPadding: return &s.NodeBodyPadding;
         case ImNodalStyleVar_NodeHoverHandleHeight: return &s.NodeHoverHandleHeight;
-        case ImNodalStyleVar_SlotDotRadius: return &s.SlotDotRadius;
         case ImNodalStyleVar_LinkThickness: return &s.LinkThickness;
         default: return nullptr;
     }
@@ -892,14 +908,9 @@ IMNODAL_API const char* GetStyleColorName(ImNodalCol aIdx) {
         case ImNodalCol_NodeBorder: return "NodeBorder";
         case ImNodalCol_NodeBorderSelected: return "NodeBorderSelected";
         case ImNodalCol_NodeHoverHandle: return "NodeHoverHandle";
-        case ImNodalCol_SlotDot: return "SlotDot";
-        case ImNodalCol_SlotDotConnected: return "SlotDotConnected";
-        case ImNodalCol_SlotDotHovered: return "SlotDotHovered";
         case ImNodalCol_Link: return "Link";
         case ImNodalCol_LinkHovered: return "LinkHovered";
         case ImNodalCol_LinkSelected: return "LinkSelected";
-        case ImNodalCol_RerouteBorder: return "RerouteBorder";
-        case ImNodalCol_RerouteBorderSelected: return "RerouteBorderSelected";
         case ImNodalCol_BoxSelectFill: return "BoxSelectFill";
         case ImNodalCol_BoxSelectBorder: return "BoxSelectBorder";
         case ImNodalCol_LinkPreviewIdle: return "LinkPreviewIdle";
@@ -920,7 +931,6 @@ IMNODAL_API const char* GetStyleVarName(ImNodalStyleVar aIdx) {
         case ImNodalStyleVar_NodeBorderThickness: return "NodeBorderThickness";
         case ImNodalStyleVar_NodeBodyPadding: return "NodeBodyPadding";
         case ImNodalStyleVar_NodeHoverHandleHeight: return "NodeHoverHandleHeight";
-        case ImNodalStyleVar_SlotDotRadius: return "SlotDotRadius";
         case ImNodalStyleVar_SlotMinSize: return "SlotMinSize";
         case ImNodalStyleVar_LinkThickness: return "LinkThickness";
         case ImNodalStyleVar_GridSize: return "GridSize";
@@ -959,7 +969,6 @@ IMNODAL_API void ShowStyleVarsEditor() {
         s.NodeBorderThickness = def.NodeBorderThickness;
         s.NodeBodyPadding = def.NodeBodyPadding;
         s.NodeHoverHandleHeight = def.NodeHoverHandleHeight;
-        s.SlotDotRadius = def.SlotDotRadius;
         s.SlotMinSize = def.SlotMinSize;
         s.LinkThickness = def.LinkThickness;
         s.GridSize = def.GridSize;
@@ -979,7 +988,6 @@ IMNODAL_API void ShowStyleVarsEditor() {
             case ImNodalStyleVar_NodeBorderThickness: return {0.0f, 8.0f, 0.1f};
             case ImNodalStyleVar_NodeBodyPadding: return {0.0f, 32.0f, 0.5f};
             case ImNodalStyleVar_NodeHoverHandleHeight: return {0.0f, 32.0f, 0.5f};
-            case ImNodalStyleVar_SlotDotRadius: return {1.0f, 20.0f, 0.1f};
             case ImNodalStyleVar_LinkThickness: return {0.5f, 16.0f, 0.1f};
             default: return {0.0f, 100.0f, 0.5f};
         }
@@ -1132,7 +1140,7 @@ IMNODAL_API bool BeginCanvas(const char* aId, const ImVec2& aSize, const CanvasS
     // Mouse is now in local space. Interactions run here.
     s_manageInteractions(rCtx);
 
-    if (rCtx.settings.drawGrid) {
+    if (!(rCtx.settings.flags & ImNodalCanvasFlags_NoGrid)) {
         DrawCanvasGrid();
     }
 
@@ -1474,7 +1482,116 @@ static void s_clearSelection(GraphState& arGraph) {
 
 // True if the multi-select modifier (default: Shift) is currently held.
 static bool s_multiSelectHeld(const GraphState& arGraph) {
-    return arGraph.settings.allowMultiSelect && ImGui::IsKeyDown(arGraph.settings.multiSelectKey);
+    if (arGraph.settings.flags & ImNodalGraphFlags_NoMultiSelect)
+        return false;
+    return ImGui::IsKeyDown(arGraph.settings.multiSelectKey);
+}
+
+// -----------------------------
+// Custom hitbox helpers
+// -----------------------------
+
+// Validate a polygon is convex AND wound in a consistent direction (CCW or
+// CW). Walks edges once, computing the cross product of consecutive edge
+// vectors; all cross-products must share the same sign. Degenerate
+// polygons (count < 3) are rejected. Linear time, no allocation, and only
+// runs at SetSlotHitbox/SetNodeHitbox call time — never per hit-test.
+static bool s_isConvexPolygon(const ImVec2* apPoints, int aCount) {
+    if (apPoints == nullptr || aCount < 3)
+        return false;
+    float dirSign = 0.0f;  // 0 = unset
+    for (int i = 0; i < aCount; ++i) {
+        const ImVec2& a = apPoints[i];
+        const ImVec2& b = apPoints[(i + 1) % aCount];
+        const ImVec2& c = apPoints[(i + 2) % aCount];
+        const float ex1 = b.x - a.x;
+        const float ey1 = b.y - a.y;
+        const float ex2 = c.x - b.x;
+        const float ey2 = c.y - b.y;
+        const float cross = ex1 * ey2 - ey1 * ex2;
+        if (std::fabs(cross) < 1e-6f)
+            continue;  // collinear — does not break convexity
+        if (dirSign == 0.0f) {
+            dirSign = (cross > 0.0f) ? 1.0f : -1.0f;
+        } else if ((cross > 0.0f) != (dirSign > 0.0f)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Hit-test an arbitrary shape against a screen-space mouse position.
+//   None   -> falls back on the AABB the caller provides (same as legacy).
+//   Rect   -> standard AABB containment.
+//   Circle -> radial distance test.
+//   ConvexPolygon -> all cross(edge_i, mouse - p_i) share the same sign.
+static bool s_hitTestShape(const ImNodalHitbox& arShape, const ImVec2& aMouse, const ImRect& arFallbackRect) {
+    switch (arShape.type) {
+        case ImNodalHitShape_Rect: {
+            return aMouse.x >= arShape.rect.Min.x && aMouse.x <= arShape.rect.Max.x &&
+                   aMouse.y >= arShape.rect.Min.y && aMouse.y <= arShape.rect.Max.y;
+        }
+        case ImNodalHitShape_Circle: {
+            const float dx = aMouse.x - arShape.center.x;
+            const float dy = aMouse.y - arShape.center.y;
+            return (dx * dx + dy * dy) <= (arShape.radius * arShape.radius);
+        }
+        case ImNodalHitShape_ConvexPolygon: {
+            if (arShape.polygonPoints == nullptr || arShape.polygonCount < 3)
+                return false;
+            float dirSign = 0.0f;
+            for (int i = 0; i < arShape.polygonCount; ++i) {
+                const ImVec2& a = arShape.polygonPoints[i];
+                const ImVec2& b = arShape.polygonPoints[(i + 1) % arShape.polygonCount];
+                const float ex = b.x - a.x;
+                const float ey = b.y - a.y;
+                const float vx = aMouse.x - a.x;
+                const float vy = aMouse.y - a.y;
+                const float cross = ex * vy - ey * vx;
+                if (std::fabs(cross) < 1e-6f)
+                    continue;
+                if (dirSign == 0.0f) {
+                    dirSign = (cross > 0.0f) ? 1.0f : -1.0f;
+                } else if ((cross > 0.0f) != (dirSign > 0.0f)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        case ImNodalHitShape_None:
+        default:
+            return aMouse.x >= arFallbackRect.Min.x && aMouse.x <= arFallbackRect.Max.x &&
+                   aMouse.y >= arFallbackRect.Min.y && aMouse.y <= arFallbackRect.Max.y;
+    }
+}
+
+// AABB englobing a shape — used for ImGui::ItemAdd / culling. Falls back
+// to the supplied rect when the shape has no override.
+static ImRect s_hitTestAABB(const ImNodalHitbox& arShape, const ImRect& arFallbackRect) {
+    switch (arShape.type) {
+        case ImNodalHitShape_Rect:
+            return arShape.rect;
+        case ImNodalHitShape_Circle: {
+            const ImVec2 r(arShape.radius, arShape.radius);
+            return ImRect(arShape.center - r, arShape.center + r);
+        }
+        case ImNodalHitShape_ConvexPolygon: {
+            if (arShape.polygonPoints == nullptr || arShape.polygonCount < 1)
+                return arFallbackRect;
+            ImVec2 lo = arShape.polygonPoints[0];
+            ImVec2 hi = lo;
+            for (int i = 1; i < arShape.polygonCount; ++i) {
+                lo.x = ImMin(lo.x, arShape.polygonPoints[i].x);
+                lo.y = ImMin(lo.y, arShape.polygonPoints[i].y);
+                hi.x = ImMax(hi.x, arShape.polygonPoints[i].x);
+                hi.y = ImMax(hi.y, arShape.polygonPoints[i].y);
+            }
+            return ImRect(lo, hi);
+        }
+        case ImNodalHitShape_None:
+        default:
+            return arFallbackRect;
+    }
 }
 
 // -----------------------------
@@ -1525,6 +1642,74 @@ static bool s_pathIntersectsRect(const ImVec2* apPoints, int aCount, const ImVec
             return true;
     }
     return false;
+}
+
+// Compute the box-select selection set for the rect (aMn, aMx) and assign
+// it into rGraph. Used by both deferred mode (called once on release) and
+// live mode (called every frame while the box is active).
+//
+// Result = base ∪ overlapping (when the multi-select modifier is held) or
+//        = overlapping (otherwise — the box replaces the previous set).
+// "base" is the pre-box snapshot captured when the box first becomes active.
+//
+// ExcludeNodes / ExcludeLinks flags skip the corresponding category — useful
+// for tools that should only ever pick one kind of object.
+static void s_commitBoxSelect(Context& arCtx, GraphState& arGraph, const ImVec2& aMn, const ImVec2& aMx) {
+    const bool toggle = s_multiSelectHeld(arGraph);
+    const bool excludeNodes = (arGraph.settings.flags & ImNodalGraphFlags_BoxSelectExcludeNodes) != 0;
+    const bool excludeLinks = (arGraph.settings.flags & ImNodalGraphFlags_BoxSelectExcludeLinks) != 0;
+
+    std::unordered_set<Id> newNodes = toggle ? arGraph.boxSelectBaseNodes : std::unordered_set<Id>{};
+    std::unordered_set<Id> newLinks = toggle ? arGraph.boxSelectBaseLinks : std::unordered_set<Id>{};
+    Id touchedNode = 0;
+    Id touchedLink = 0;
+
+    if (!excludeNodes) {
+        // Nodes : selected as soon as their VISUAL rect intersects the box
+        // (AABB-AABB overlap). More forgiving than "center inside the box" :
+        // a single corner of the node touching the box is enough.
+        for (const auto& kv : arCtx.nodes) {
+            if (kv.second.graphId != arGraph.id)
+                continue;
+            // NotSelectable nodes never enter the box selection.
+            if (kv.second.settings.flags & ImNodalNodeFlags_NotSelectable)
+                continue;
+            const ImRect& r = kv.second.lastScreenRect;
+            if (r.Min.x >= r.Max.x)
+                continue;
+            const bool overlaps = r.Min.x <= aMx.x && r.Max.x >= aMn.x && r.Min.y <= aMx.y && r.Max.y >= aMn.y;
+            if (overlaps && newNodes.insert(kv.first).second) {
+                touchedNode = kv.first;
+            }
+        }
+    }
+    if (!excludeLinks) {
+        // Links : selected as soon as the path emitted by the primitives
+        // touches the box, even partially. We test chord-vs-rect on each
+        // polyline segment — a single grazing intersection is enough.
+        // Works for bezier, Manhattan, and any custom shape.
+        for (const auto& kv : arCtx.links) {
+            if (kv.second.graphId != arGraph.id)
+                continue;
+            if (!kv.second.pathCached)
+                continue;
+            if (s_pathIntersectsRect(kv.second.cachedPath.data(), (int)kv.second.cachedPath.size(), aMn, aMx)) {
+                if (newLinks.insert(kv.first).second) {
+                    touchedLink = kv.first;
+                }
+            }
+        }
+    }
+
+    if (newNodes != arGraph.selectedNodes || newLinks != arGraph.selectedLinks) {
+        arGraph.selectedNodes = std::move(newNodes);
+        arGraph.selectedLinks = std::move(newLinks);
+        arGraph.selectionChangedThisFrame = true;
+    }
+    if (touchedNode != 0)
+        arGraph.lastSelectedNode = touchedNode;
+    if (touchedLink != 0)
+        arGraph.lastSelectedLink = touchedLink;
 }
 
 }  // namespace
@@ -1611,7 +1796,7 @@ IMNODAL_API void EndGraph() {
     // Phase 2: promote pending click to box-select once drag distance crosses
     // the threshold. We compare in SCREEN-SPACE (mousePosBackup vs the screen
     // click position) ; the threshold is in screen pixels, independent of zoom.
-    if (rCtx.pendingBgClick && lmbDown && !rCtx.boxSelectActive && rGraph.settings.allowBoxSelect) {
+    if (rCtx.pendingBgClick && lmbDown && !rCtx.boxSelectActive && !(rGraph.settings.flags & ImNodalGraphFlags_NoBoxSelect)) {
         const ImVec2 d = rCtx.mousePosBackup - rCtx.pendingBgClickPosScreen;
         constexpr float kThreshold = 4.0f;  // screen-pixels
         if ((d.x * d.x + d.y * d.y) > (kThreshold * kThreshold)) {
@@ -1625,7 +1810,9 @@ IMNODAL_API void EndGraph() {
         }
     }
 
-    // Phase 3: while box-select is active, draw the rectangle on the overlay channel.
+    // Phase 3: while box-select is active, draw the rectangle on the overlay
+    // channel AND — if BoxSelectLive is set — rebuild the selection live so
+    // the user sees what's about to be selected as they drag.
     if (rCtx.boxSelectActive && rCtx.boxSelectGraphId == rGraph.id) {
         const ImVec2 mn(ImMin(rCtx.boxSelectStart.x, mouseLocal.x), ImMin(rCtx.boxSelectStart.y, mouseLocal.y));
         const ImVec2 mx(ImMax(rCtx.boxSelectStart.x, mouseLocal.x), ImMax(rCtx.boxSelectStart.y, mouseLocal.y));
@@ -1633,53 +1820,39 @@ IMNODAL_API void EndGraph() {
         rCtx.drawList->AddRectFilled(mn, mx, rCtx.style.Colors[ImNodalCol_BoxSelectFill]);
         rCtx.drawList->AddRect(mn, mx, rCtx.style.Colors[ImNodalCol_BoxSelectBorder]);
         s_setChannel(rCtx, GC_Content);
+
+        // Snapshot the pre-box selection ONCE when the box becomes active.
+        // The live mode uses this snapshot as the additive base so dragging
+        // does not erase pre-existing selections (multi-select modifier
+        // semantics). Captured here even for deferred mode in case the
+        // host toggles BoxSelectLive on later — cheap and harmless.
+        if (!rGraph.boxSelectBaseCaptured) {
+            rGraph.boxSelectBaseNodes = rGraph.selectedNodes;
+            rGraph.boxSelectBaseLinks = rGraph.selectedLinks;
+            rGraph.boxSelectBaseCaptured = true;
+        }
+
+        if (rGraph.settings.flags & ImNodalGraphFlags_BoxSelectLive) {
+            s_commitBoxSelect(rCtx, rGraph, mn, mx);
+        }
     }
 
     // Phase 4: on release — either commit the box (if it was a drag) or treat
     // as a plain bg-click and clear the selection.
     if (lmbReleased && rCtx.pendingBgClick) {
         if (rCtx.boxSelectActive && rCtx.boxSelectGraphId == rGraph.id) {
-            const ImVec2 mn(ImMin(rCtx.boxSelectStart.x, mouseLocal.x), ImMin(rCtx.boxSelectStart.y, mouseLocal.y));
-            const ImVec2 mx(ImMax(rCtx.boxSelectStart.x, mouseLocal.x), ImMax(rCtx.boxSelectStart.y, mouseLocal.y));
-            const bool toggle = s_multiSelectHeld(rGraph);
-            if (!toggle)
-                s_clearSelection(rGraph);
-
-            // Nodes : selected as soon as their VISUAL rect intersects the box
-            // (AABB-AABB overlap). More forgiving than "center inside the box" :
-            // a single corner of the node touching the box is enough.
-            for (const auto& kv : rCtx.nodes) {
-                if (kv.second.graphId != rGraph.id)
-                    continue;
-                const ImRect& r = kv.second.lastScreenRect;
-                if (r.Min.x >= r.Max.x)
-                    continue;
-                const bool overlaps = r.Min.x <= mx.x && r.Max.x >= mn.x && r.Min.y <= mx.y && r.Max.y >= mn.y;
-                if (overlaps) {
-                    if (rGraph.selectedNodes.insert(kv.first).second) {
-                        rGraph.lastSelectedNode = kv.first;
-                        rGraph.selectionChangedThisFrame = true;
-                    }
-                }
-            }
-            // Links : selected as soon as the path emitted by the primitives
-            // touches the box, even partially. We test chord-vs-rect on each
-            // polyline segment — a single grazing intersection is enough.
-            // Works for bezier, Manhattan, and any custom shape.
-            for (const auto& kv : rCtx.links) {
-                if (kv.second.graphId != rGraph.id)
-                    continue;
-                if (!kv.second.pathCached)
-                    continue;
-                if (s_pathIntersectsRect(kv.second.cachedPath.data(), (int)kv.second.cachedPath.size(), mn, mx)) {
-                    if (rGraph.selectedLinks.insert(kv.first).second) {
-                        rGraph.lastSelectedLink = kv.first;
-                        rGraph.selectionChangedThisFrame = true;
-                    }
-                }
+            // Deferred mode does the commit here; live mode already updated
+            // the selection every frame and only needs to release the box.
+            if (!(rGraph.settings.flags & ImNodalGraphFlags_BoxSelectLive)) {
+                const ImVec2 mn(ImMin(rCtx.boxSelectStart.x, mouseLocal.x), ImMin(rCtx.boxSelectStart.y, mouseLocal.y));
+                const ImVec2 mx(ImMax(rCtx.boxSelectStart.x, mouseLocal.x), ImMax(rCtx.boxSelectStart.y, mouseLocal.y));
+                s_commitBoxSelect(rCtx, rGraph, mn, mx);
             }
             rCtx.boxSelectActive = false;
             rCtx.boxSelectGraphId = 0;
+            rGraph.boxSelectBaseNodes.clear();
+            rGraph.boxSelectBaseLinks.clear();
+            rGraph.boxSelectBaseCaptured = false;
         } else {
             // Plain bg-click → clear selection unless multi-modifier is held.
             if (!s_multiSelectHeld(rGraph)) {
@@ -1729,10 +1902,9 @@ IMNODAL_API bool BeginNode(Id aNodeId, ImVec2* apPos, const NodeSettings& arSett
     NodeState& rNode = rCtx.nodes[aNodeId];
     rNode.graphId = rCtx.currentGraphId;
     rNode.settings = arSettings;
-    rNode.isReroute = false;  // BeginRerouteNode re-set this AFTER BeginNode if needed
+    rNode.customHitbox = ImNodalHitbox{};  // SetNodeHitbox between Begin/End writes here
     rNode.currentMaxToplevelNatWidth = 0.0f;
     rNode.currentMaxToplevelNatHeight = 0.0f;
-    rNode.rerouteSlotId = 0;
     rNode.userPosPtr = apPos;
     rNode.color = 0;  // SetNodeColor between Begin/End writes here, reset each frame
 
@@ -1783,23 +1955,25 @@ IMNODAL_API void EndNode() {
     rNode.lastFrameMaxToplevelNatWidth = rNode.currentMaxToplevelNatWidth;
     rNode.lastFrameMaxToplevelNatHeight = rNode.currentMaxToplevelNatHeight;
 
-    // Hover test : standard rect except for reroutes which are circular
-    // -> distance to the dot center, radius slightly larger than the visual area.
+    // SetNodeHitbox between Begin/EndNode? Promote the staging hitbox to the
+    // node's persistent state, then clear staging so the next node starts
+    // fresh. Reset BEFORE the hit-test reads it so a missing SetNodeHitbox
+    // call falls back to the rectangular default.
+    if (rCtx.stagingNodeHitbox.type != ImNodalHitShape_None) {
+        rNode.customHitbox = rCtx.stagingNodeHitbox;
+    }
+    rCtx.stagingNodeHitbox = ImNodalHitbox{};
+
+    // Hover test : the rectangular fallback covers the legacy "node = AABB"
+    // behavior. A custom hitbox (SetNodeHitbox) overrides the shape — used
+    // for circular reroute dots, diamond decision nodes, ...
     // Canvas-hovered gate : a node never registers as hovered when the mouse
     // sits on a side panel, another window or another canvas — even if its
     // screen rect happens to cover the cursor position there.
-    if (rNode.isReroute) {
-        auto sIt = rCtx.slots.find(rNode.rerouteSlotId);
-        const ImVec2 center =
-            (sIt != rCtx.slots.end()) ? sIt->second.screenPos : ImVec2((nodeMin.x + nodeMax.x) * 0.5f, (nodeMin.y + nodeMax.y) * 0.5f);
-        const float baseR = (rNode.rerouteHitRadius > 0.0f) ? rNode.rerouteHitRadius : rCtx.style.SlotDotRadius;
-        const float hitR = baseR + 6.0f;
+    {
+        const ImRect fallback(nodeMin, nodeMax);
         const ImVec2 mp = ImGui::GetIO().MousePos;
-        const float dx = mp.x - center.x;
-        const float dy = mp.y - center.y;
-        rNode.hovered = (dx * dx + dy * dy <= hitR * hitR) && rCtx.hovered;
-    } else {
-        rNode.hovered = ImGui::IsMouseHoveringRect(nodeMin, nodeMax) && rCtx.hovered;
+        rNode.hovered = s_hitTestShape(rNode.customHitbox, mp, fallback) && rCtx.hovered;
     }
     if (rNode.hovered) {
         rCtx.currentHoveredNode = rCtx.currentNodeId;
@@ -1813,13 +1987,15 @@ IMNODAL_API void EndNode() {
     // "topmost" = mouse on node AND no user widget is above the cursor.
     const bool hoveredTopMost = rNode.hovered && !ImGui::IsAnyItemHovered();
 
-    if (hoveredTopMost && lmbClicked) {
+    const bool notSelectable = (rNode.settings.flags & ImNodalNodeFlags_NotSelectable) != 0;
+    const bool notMovable = (rNode.settings.flags & ImNodalNodeFlags_NotMovable) != 0;
+    if (hoveredTopMost && lmbClicked && !notSelectable) {
         const bool toggle = s_multiSelectHeld(rGraph);
         s_selectNode(rGraph, rCtx.currentNodeId, toggle);
         rGraph.clickConsumedThisFrame = true;
         // Don't start a drag when toggling — the user is building a selection,
         // not moving the node.
-        if (rNode.settings.movable && !toggle) {
+        if (!notMovable && !toggle) {
             rCtx.draggingNodeId = rCtx.currentNodeId;
             rCtx.dragStartNodePos = rNode.pos;
             rCtx.dragStartMouseCanvas = ImGui::GetIO().MousePos;  // canvas space (we're in local space)
@@ -1854,20 +2030,21 @@ IMNODAL_API void EndNode() {
     auto* const pDrawList = rCtx.drawList;
     const Style& s = rCtx.style;
     const float rounding = s.NodeRounding;
+    const bool noBody = (rNode.settings.flags & ImNodalNodeFlags_NoBody) != 0;
     // Body fill on BgFill (deepest node channel). The host can layer its own
     // tint (header band, etc.) on UserBg ABOVE this and BELOW the border.
-    if (!rNode.isReroute) {
+    if (!noBody) {
         s_setChannel(rCtx, GC_BgFill);
         pDrawList->AddRectFilled(nodeMin, nodeMax, s.Colors[ImNodalCol_NodeBody], rounding);
     }
     // Border + hover handle on BgBorder (above UserBg) so they stay visible
     // on top of any host-drawn header/footer band.
-    if (!rNode.isReroute) {
+    if (!noBody) {
         s_setChannel(rCtx, GC_BgBorder);
         const ImU32 borderCol = rNode.selected ? s.Colors[ImNodalCol_NodeBorderSelected] : s.Colors[ImNodalCol_NodeBorder];
         pDrawList->AddRect(nodeMin, nodeMax, borderCol, rounding, 0, s.NodeBorderThickness);
     }
-    if (rNode.settings.drawHoverHandle && rNode.hovered) {
+    if ((rNode.settings.flags & ImNodalNodeFlags_HoverHandle) && rNode.hovered) {
         s_setChannel(rCtx, GC_BgBorder);
         const float h = s.NodeHoverHandleHeight;
         const ImVec2 bMin(nodeMin.x + 2.0f, nodeMin.y + 1.0f);
@@ -2081,8 +2258,12 @@ IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const SlotSettings& arSet
     rSlot.graphId = rCtx.currentGraphId;
     rSlot.role = aRole;
     rSlot.typeTag = arSettings.typeTag;
+    rSlot.flags = arSettings.flags;
+    // SetSlotHitbox between Begin/End writes here. Reset before the early
+    // hover test so a missing call falls back to the last-frame rect.
+    rSlot.customHitbox = ImNodalHitbox{};
 
-    // EARLY hover hit-test against the previous frame's hit rect. Without this,
+    // EARLY hover hit-test against the previous frame's hit shape. Without this,
     // rSlot.hovered would stay false until EndSlot — but the host typically
     // queries IsSlotHovered() / double-click handlers BETWEEN BeginSlot and
     // EndSlot, so they'd always read false. Using last frame's rect introduces
@@ -2125,8 +2306,10 @@ IMNODAL_API void EndSlot() {
     // and EndSlot, the cursor is still at the BeginGroup position. Insert a
     // Dummy of `Style.SlotMinSize` so the slot has a hit area the host can
     // hover and link-drag from. The host then paints its own dot/icon at
-    // GetSlotScreenPos(slotId).
-    {
+    // GetSlotScreenPos(slotId). Skip when SlotFlags_NoEmptyDummy is set —
+    // the host wants the slot rect to be exactly the host content (or
+    // empty if there's no content at all).
+    if (!(rSlot.flags & ImNodalSlotFlags_NoEmptyDummy)) {
         const ImVec2 cur = ImGui::GetCursorScreenPos();
         if (cur.x == rCtx.currentSlotBeginCursor.x && cur.y == rCtx.currentSlotBeginCursor.y) {
             ImGui::Dummy(rCtx.style.SlotMinSize);
@@ -2173,27 +2356,21 @@ IMNODAL_API void EndSlot() {
     rCtx.slotSize = ImVec2(0.0f, 0.0f);
     rCtx.slotPivotOffset = ImVec2(0.0f, 0.0f);
 
-    // Hit area : the group rect, no inflation. ImNodal does not draw the dot
-    // anymore so there's no halo to extend. EXCEPTION : on a reroute slot we
-    // restrict to a circle (rerouteHitRadius) around the screenPos so the
-    // empty quadrants of the group rect don't grab clicks meant for the
-    // node body — UE-style "dot grabs link, node grabs drag".
-    bool slotOnReroute = false;
-    float rerouteHitRadius = 0.0f;
-    if (rCtx.currentNodeId != 0) {
-        auto nIt = rCtx.nodes.find(rCtx.currentNodeId);
-        if (nIt != rCtx.nodes.end()) {
-            slotOnReroute = nIt->second.isReroute;
-            rerouteHitRadius = nIt->second.rerouteHitRadius;
-        }
+    // Promote the staging hitbox (set by SetSlotHitbox between Begin/End)
+    // to the slot's persistent state. Reset staging so the next slot starts
+    // fresh.
+    if (rCtx.stagingSlotHitbox.type != ImNodalHitShape_None) {
+        rSlot.customHitbox = rCtx.stagingSlotHitbox;
     }
-    ImRect hitBB;
-    if (slotOnReroute && rerouteHitRadius > 0.0f) {
-        hitBB = ImRect(rSlot.screenPos - ImVec2(rerouteHitRadius, rerouteHitRadius),
-                       rSlot.screenPos + ImVec2(rerouteHitRadius, rerouteHitRadius));
-    } else {
-        hitBB = ImRect(gMin, gMax);
-    }
+    rCtx.stagingSlotHitbox = ImNodalHitbox{};
+
+    // Hit area : the group rect by default. SetSlotHitbox lets the host
+    // override the shape (circle for reroute dots, polygon for diamond
+    // corners, rect for arbitrary screen-space areas). The AABB englobing
+    // the shape is what ImGui::ItemAdd / culling consume; the actual hover
+    // / click test goes through s_hitTestShape so the shape itself decides.
+    const ImRect groupRect(gMin, gMax);
+    const ImRect hitBB = s_hitTestAABB(rSlot.customHitbox, groupRect);
     // Cache for next frame's BeginSlot early hover test + EndGraph hover frame.
     rSlot.lastHitRect = hitBB;
 
@@ -2216,14 +2393,20 @@ IMNODAL_API void EndSlot() {
     // we're actually inside a canvas scope (anatomy outside canvas keeps
     // its geometric-only behavior).
     const bool gateOK = (!rCtx.active) || rCtx.hovered;
-    const bool mouseOnSlot = gateOK && ImGui::IsMouseHoveringRect(hitBB.Min, hitBB.Max, false);
-    rSlot.hovered = btnHovered || mouseOnSlot;
+    const ImVec2 mp = ImGui::GetIO().MousePos;
+    const bool mouseOnSlot = gateOK && s_hitTestShape(rSlot.customHitbox, mp, groupRect);
+    // ButtonBehavior reports hovered using the AABB; refine with the actual
+    // shape so a circular slot doesn't grab clicks in the rect's empty
+    // corners. (Cheap : the shape was already evaluated above.)
+    const bool buttonShapeHover = btnHovered && s_hitTestShape(rSlot.customHitbox, mp, groupRect);
+    rSlot.hovered = buttonShapeHover || mouseOnSlot;
     if (mouseOnSlot) {
         rCtx.currentHoveredSlot = rCtx.currentSlotId;
     }
 
     // Start a connection drag on click.
-    if (btnHeld && rCtx.draggingFromSlot == 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    const bool noConnStart = (rSlot.flags & ImNodalSlotFlags_NoConnectionStart) != 0;
+    if (!noConnStart && buttonShapeHover && btnHeld && rCtx.draggingFromSlot == 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         rCtx.draggingFromSlot = rCtx.currentSlotId;
         if (rCtx.graphActive) {
             rCtx.graphs[rCtx.currentGraphId].clickConsumedThisFrame = true;
@@ -2231,7 +2414,8 @@ IMNODAL_API void EndSlot() {
     }
 
     // Right-click on the slot → context menu request.
-    if (mouseOnSlot && ImGui::IsMouseClicked(rCtx.settings.contextMenuButton)) {
+    const bool noCtxMenu = (rSlot.flags & ImNodalSlotFlags_NoContextMenu) != 0;
+    if (!noCtxMenu && mouseOnSlot && ImGui::IsMouseClicked(rCtx.settings.contextMenuButton)) {
         rSlot.ctxMenuRequested = true;
         rCtx.ctxMenuSlotId = rCtx.currentSlotId;
     }
@@ -2695,6 +2879,12 @@ IMNODAL_API bool QueryNewLink(Id* apoFromSlotId, Id* apoToSlotId) {
     auto itF = rCtx.slots.find(from);
     auto itT = rCtx.slots.find(to);
     if (itF == rCtx.slots.end() || itT == rCtx.slots.end())
+        return false;
+    // Slot-flag gate : target slot may explicitly opt out of being a link
+    // sink. Source slot may opt out of being a link source.
+    if (itF->second.flags & ImNodalSlotFlags_NoConnectionStart)
+        return false;
+    if (itT->second.flags & ImNodalSlotFlags_NoConnectionEnd)
         return false;
     // Target must live in the same scope too (no cross-scope links in M2).
     const Id currentScope = rCtx.graphActive ? rCtx.currentGraphId : (Id)0;
@@ -3525,7 +3715,7 @@ IMNODAL_API void ShowMiniMap(const MiniMapSettings& arSettings) {
         if (it == rCtx.nodes.end())
             continue;
         const NodeState& n = it->second;
-        if (n.isReroute)
+        if (n.settings.flags & ImNodalNodeFlags_HiddenInMinimap)
             continue;
         const ImRect& nr_canvas = n.lastScreenRect;
         if (nr_canvas.GetWidth() <= 0.0f)
@@ -3617,6 +3807,33 @@ IMNODAL_API void SlotSize(const ImVec2& aSizePx) {
 }
 IMNODAL_API void SlotPivotOffset(const ImVec2& aOffsetPx) {
     s_getCtx().slotPivotOffset = aOffsetPx;
+}
+
+// =====================================================================
+// Custom hitbox API
+// =====================================================================
+// SetSlotHitbox / SetNodeHitbox stage a shape that End* consumes to
+// override the rectangular hit area. Convex polygons are validated here
+// once per call (debug assert) — never per hit-test.
+
+IMNODAL_API void SetSlotHitbox(const ImNodalHitbox& aHitbox) {
+    Context& rCtx = s_getCtx();
+    IM_ASSERT(rCtx.currentSlotId != 0 && "SetSlotHitbox must be called between BeginSlot/EndSlot");
+    if (aHitbox.type == ImNodalHitShape_ConvexPolygon) {
+        IM_ASSERT(s_isConvexPolygon(aHitbox.polygonPoints, aHitbox.polygonCount) &&
+                  "ImNodal hitbox polygon must be convex (and have >= 3 distinct points)");
+    }
+    rCtx.stagingSlotHitbox = aHitbox;
+}
+
+IMNODAL_API void SetNodeHitbox(const ImNodalHitbox& aHitbox) {
+    Context& rCtx = s_getCtx();
+    IM_ASSERT(rCtx.currentNodeId != 0 && "SetNodeHitbox must be called between BeginNode/EndNode");
+    if (aHitbox.type == ImNodalHitShape_ConvexPolygon) {
+        IM_ASSERT(s_isConvexPolygon(aHitbox.polygonPoints, aHitbox.polygonCount) &&
+                  "ImNodal hitbox polygon must be convex (and have >= 3 distinct points)");
+    }
+    rCtx.stagingNodeHitbox = aHitbox;
 }
 
 // =====================================================================
@@ -3720,51 +3937,6 @@ IMNODAL_API void NavigateToSelection(bool aZoomToFit, float aMarginRatio) {
         const ImVec2 center((lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f);
         CenterCanvasOn(center);
     }
-}
-
-// =====================================================================
-// Reroute node (M2)
-// =====================================================================
-// Minimal 1-in/1-out pass-through node. Capture-only : ImNodal sets up the
-// node geometry, the InOut slot pivot at its center and a circular hit
-// area of `aHitRadius` around it. The host paints the visible dot/ring
-// AFTER EndRerouteNode using GetSlotScreenPos / IsNodeSelected.
-
-IMNODAL_API bool BeginRerouteNode(Id aNodeId, Id aSlotId, ImVec2* apPos, const NodeSettings& arSettings, float aHitRadius) {
-    Context& rCtx = s_getCtx();
-    NodeSettings reSettings = arSettings;
-    reSettings.drawHoverHandle = false;
-    if (!BeginNode(aNodeId, apPos, reSettings)) {
-        return false;
-    }
-
-    // Mark the node as a reroute so EndNode skips the body/border draw
-    // (the host paints those) and EndGraph skips the rectangular hover
-    // halo on the slot.
-    {
-        auto it = rCtx.nodes.find(aNodeId);
-        if (it != rCtx.nodes.end()) {
-            it->second.isReroute = true;
-            it->second.rerouteSlotId = aSlotId;
-            it->second.rerouteHitRadius = (aHitRadius > 0.0f) ? aHitRadius : rCtx.style.SlotDotRadius;
-        }
-    }
-
-    SlotSettings dotSettings{};
-    // Empty Dummy of (2r, 2r) sized on aHitRadius so the slot group rect
-    // is centered around what the host will paint as the dot. The slot
-    // pivot ends up at the center thanks to SlotRole_InOut.
-    const float r = (aHitRadius > 0.0f) ? aHitRadius : rCtx.style.SlotDotRadius;
-    const float d = r * 2.0f;
-    BeginSlot(aSlotId, SlotRole_InOut, dotSettings);
-    ImGui::Dummy(ImVec2(d, d));
-    EndSlot();
-
-    return true;
-}
-
-IMNODAL_API void EndRerouteNode() {
-    EndNode();
 }
 
 // ShowDemoWindow lives in ImNodalDemo.cpp.

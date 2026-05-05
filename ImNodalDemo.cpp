@@ -165,7 +165,7 @@ inline void DemoEmitSlot(SlotRole role, const DemoSlot& s, bool vertical) {
     } else {
         SlotAlignment(role == SlotRole_Output ? ImVec2(1.0f, 0.5f) : ImVec2(0.0f, 0.5f));
     }
-    const float r = GetStyleVarFloat(ImNodalStyleVar_SlotDotRadius);
+    constexpr float r = 5.0f;  // demo-local dot radius (host owns the dot draw)
     const float pad = r * 2.0f + 4.0f;
     if (vertical) {
         // Compact label, vertical layout doesn't need pre-padding.
@@ -509,11 +509,35 @@ inline void DemoDrawCanvas(DemoState& st) {
     if (BeginGraph(0xDEADBEEFull, gs)) {
         for (auto& n : st.nodes) DemoRenderNode(n);
 
-        // Reroutes (capture-only, host paints dot + ring).
+        // Reroutes — a body-less node + an InOut slot with a circular hitbox.
+        // Host paints the visible dot + selection ring. ImNodal no longer
+        // ships a "reroute" primitive; the same effect is achieved with the
+        // generic flags + SetNodeHitbox / SetSlotHitbox APIs.
         for (auto& rr : st.reroutes) {
             constexpr float kRR = 5.0f;
-            BeginRerouteNode(rr.nodeId, rr.slotId, &rr.pos, NodeSettings{}, kRR);
-            EndRerouteNode();
+            NodeSettings nset;
+            nset.flags = ImNodalNodeFlags_NoBody | ImNodalNodeFlags_HiddenInMinimap;
+            if (BeginNode(rr.nodeId, &rr.pos, nset)) {
+                BeginSlot(rr.slotId, SlotRole_InOut);
+                const ImVec2 d(kRR * 2.0f, kRR * 2.0f);
+                ImGui::Dummy(d);
+                const ImVec2 c = ImGui::GetItemRectMin() + d * 0.5f;
+                // Slot hit = the dot itself; node hit = a slightly larger
+                // ring so clicking just outside the dot drags the reroute
+                // (UE-style: dot starts a wire, ring drags the node).
+                ImNodalHitbox slotHit;
+                slotHit.type = ImNodalHitShape_Circle;
+                slotHit.center = c;
+                slotHit.radius = kRR;
+                SetSlotHitbox(slotHit);
+                EndSlot();
+                ImNodalHitbox nodeHit;
+                nodeHit.type = ImNodalHitShape_Circle;
+                nodeHit.center = c;
+                nodeHit.radius = kRR + 6.0f;
+                SetNodeHitbox(nodeHit);
+                EndNode();
+            }
             const ImVec2 c = GetSlotScreenPos(rr.slotId);
             auto* dl = ImGui::GetWindowDrawList();
             const ImU32 dotCol = IsSlotHovered(rr.slotId) ? IM_COL32_WHITE : rr.color;

@@ -58,14 +58,9 @@ enum ImNodalCol_ {
     ImNodalCol_NodeBorder,
     ImNodalCol_NodeBorderSelected,
     ImNodalCol_NodeHoverHandle,
-    ImNodalCol_SlotDot,
-    ImNodalCol_SlotDotConnected,
-    ImNodalCol_SlotDotHovered,
     ImNodalCol_Link,  // default link color (when host passes 0)
     ImNodalCol_LinkHovered,
     ImNodalCol_LinkSelected,
-    ImNodalCol_RerouteBorder,  // faint frame at rest
-    ImNodalCol_RerouteBorderSelected,
     ImNodalCol_BoxSelectFill,
     ImNodalCol_BoxSelectBorder,
     ImNodalCol_LinkPreviewIdle,    // wire color while dragging, no target hovered
@@ -94,7 +89,6 @@ enum ImNodalStyleVar_ {
     ImNodalStyleVar_NodeBorderThickness,    // float
     ImNodalStyleVar_NodeBodyPadding,        // float
     ImNodalStyleVar_NodeHoverHandleHeight,  // float
-    ImNodalStyleVar_SlotDotRadius,          // float — recommended dot radius for hosts; not drawn by ImNodal
     ImNodalStyleVar_SlotMinSize,            // ImVec2 — Dummy size used when BeginSlot/EndSlot encloses no widget
     ImNodalStyleVar_LinkThickness,          // float (default when Link() gets thickness=0)
     ImNodalStyleVar_GridSize,               // ImVec2
@@ -102,6 +96,88 @@ enum ImNodalStyleVar_ {
     ImNodalStyleVar_COUNT,
 };
 typedef int ImNodalStyleVar;
+
+// =====================================================================
+// Behavior flags (bitwise) — same idiom as ImGuiWindowFlags / ImGuiTableFlags
+// =====================================================================
+// Flags drive binary behaviors on Canvas / Graph / Node / Slot. Anything
+// numeric (radius, key, button) stays a regular field on the matching
+// *Settings struct. Flags are stored in `*Settings::flags` and are NOT
+// reset between frames — pass them every frame just like the other settings.
+
+enum ImNodalCanvasFlags_ {
+    ImNodalCanvasFlags_None   = 0,
+    ImNodalCanvasFlags_NoGrid = 1 << 0,  // skip the auto grid draw inside BeginCanvas
+};
+typedef int ImNodalCanvasFlags;
+
+enum ImNodalGraphFlags_ {
+    ImNodalGraphFlags_None                  = 0,
+    ImNodalGraphFlags_NoBoxSelect           = 1 << 0,  // disable left-drag-from-empty box selection
+    ImNodalGraphFlags_NoMultiSelect         = 1 << 1,  // ignore multiSelectKey (single-selection only)
+    ImNodalGraphFlags_BoxSelectExcludeNodes = 1 << 2,  // box-select picks links only — nodes are ignored
+    ImNodalGraphFlags_BoxSelectExcludeLinks = 1 << 3,  // box-select picks nodes only — links are ignored
+    // Box-select selection timing :
+    //   default (off)        : selection commits ONCE on mouse release
+    //   ImNodalGraphFlags_BoxSelectLive : selection updates every frame as the
+    //                                     box grows / shrinks (live preview).
+    //                                     The pre-box selection is preserved
+    //                                     when the multi-select key is held,
+    //                                     cleared otherwise.
+    ImNodalGraphFlags_BoxSelectLive         = 1 << 4,
+};
+typedef int ImNodalGraphFlags;
+
+enum ImNodalNodeFlags_ {
+    ImNodalNodeFlags_None             = 0,
+    ImNodalNodeFlags_NoBody           = 1 << 0, // skip body fill + border (host paints its own visual)
+    ImNodalNodeFlags_HoverHandle      = 1 << 1, // draw a drag bar on top of the node when hovered
+    ImNodalNodeFlags_NotMovable       = 1 << 2, // node is selectable but cannot be dragged
+    ImNodalNodeFlags_NotSelectable    = 1 << 3, // clicks on the node hit area never enter selection
+    ImNodalNodeFlags_HiddenInMinimap  = 1 << 4, // skip the node when painting the minimap
+};
+typedef int ImNodalNodeFlags;
+
+enum ImNodalSlotFlags_ {
+    ImNodalSlotFlags_None              = 0,
+    ImNodalSlotFlags_NoConnectionStart = 1 << 0,  // cannot start a link drag from this slot
+    ImNodalSlotFlags_NoConnectionEnd   = 1 << 1,  // cannot terminate a link on this slot
+    ImNodalSlotFlags_NoContextMenu     = 1 << 2,  // right-click on the slot hit area is ignored
+    ImNodalSlotFlags_NoEmptyDummy      = 1 << 3,  // disable the "empty slot -> SlotMinSize Dummy" fallback
+};
+typedef int ImNodalSlotFlags;
+
+// =====================================================================
+// Custom hitbox shape (used by SetNodeHitbox / SetSlotHitbox)
+// =====================================================================
+// Lets the host override the default rectangular hit area with an arbitrary
+// shape (rect / circle / convex polygon). Useful for diamond-shaped nodes,
+// reroute dots (small circles), pie slots, etc. The shape is NOT drawn —
+// it only drives ImNodal's hit-tests. The host stays responsible for the
+// visual, the hitbox simply tells ImNodal where the user can click/hover.
+//
+// Polygon must be CONVEX. Validity is asserted in SetNodeHitbox /
+// SetSlotHitbox at the point of registration (not at hit-test time) so
+// the cost is paid once per slot per frame — and only in builds where
+// IM_ASSERT is enabled (debug). Concave polygons are rejected by assert.
+
+enum ImNodalHitShape_ {
+    ImNodalHitShape_None          = 0,  // no override — fall back to the group rect
+    ImNodalHitShape_Rect          = 1,  // axis-aligned rect in screen space
+    ImNodalHitShape_Circle        = 2,  // center + radius in screen space
+    ImNodalHitShape_ConvexPolygon = 3,  // points in screen space, CCW or CW (convex required)
+};
+typedef int ImNodalHitShape;
+
+struct ImNodalHitbox {
+    ImNodalHitShape type{ImNodalHitShape_None};
+    ImRect          rect{};               // ImNodalHitShape_Rect
+    ImVec2          center{};             // ImNodalHitShape_Circle
+    float           radius{0.0f};         // ImNodalHitShape_Circle
+    const ImVec2*   polygonPoints{nullptr};  // ImNodalHitShape_ConvexPolygon — caller-owned, must outlive the call
+    int             polygonCount{0};
+    ImNodalHitbox() = default;
+};
 
 namespace ImNodal {
 
@@ -149,7 +225,6 @@ struct Style {
     float  NodeBorderThickness;
     float  NodeBodyPadding;
     float  NodeHoverHandleHeight;
-    float  SlotDotRadius;
     ImVec2 SlotMinSize;
     float  LinkThickness;
     ImVec2 GridSize;
@@ -199,6 +274,9 @@ IMNODAL_API void ShowDemoWindow(bool* apoOpen = nullptr);
 // =====================================================================
 
 struct CanvasSettings {
+    // Behavior flags (binary toggles) — see ImNodalCanvasFlags_.
+    ImNodalCanvasFlags flags{ImNodalCanvasFlags_None};
+
     // Zoom
     float zoomStep{0.1f};                                      // Amount added/removed per wheel tick
     float zoomMin{0.1f};                                       // Minimum scale
@@ -210,9 +288,6 @@ struct CanvasSettings {
 
     // Context menu
     ImGuiMouseButton contextMenuButton{ImGuiMouseButton_Right};// Button triggering background context menu request
-
-    // Grid
-    bool drawGrid{true};                                       // Auto-draw grid during Begin (can also be called manually)
 
     CanvasSettings() = default;
 };
@@ -272,7 +347,7 @@ IMNODAL_API void ResumeCanvas();
 IMNODAL_API bool IsCanvasSuspended();
 
 // -----------------------------
-// Manual grid draw (only needed if you disabled CanvasSettings::drawGrid).
+// Manual grid draw (only needed if you set ImNodalCanvasFlags_NoGrid).
 // Must be called between Begin and End.
 // -----------------------------
 IMNODAL_API void DrawCanvasGrid();
@@ -323,8 +398,9 @@ typedef int SlotRole;
 // Graph
 // -----------------------------
 struct GraphSettings {
-    bool allowBoxSelect{true};
-    bool allowMultiSelect{true};
+    // Behavior flags (binary toggles) — see ImNodalGraphFlags_.
+    ImNodalGraphFlags flags{ImNodalGraphFlags_None};
+
     ImGuiKey multiSelectKey{ImGuiMod_Shift};
     ImGuiMouseButton selectButton{ImGuiMouseButton_Left};
     ImGuiMouseButton dragButton{ImGuiMouseButton_Left};
@@ -345,10 +421,15 @@ IMNODAL_API Id   GetCurrentGraphId();
 // inside EndNode — nothing else. Use the layout primitives BeginH/V/Spring
 // to assemble the content. Headers, footers, columns, and any tinted band
 // are the host's responsibility (paint via GetNodeBackgroundDrawList).
+//
+// Behaviors are packed in `flags` — see ImNodalNodeFlags_. Combine with
+// `|`. Defaults preserve the legacy behavior : movable = ON (set
+// NotMovable to disable), no HoverHandle, body drawn, etc. Hosts that
+// want a "reroute-like" node combine `ImNodalNodeFlags_NoBody |
+// ImNodalNodeFlags_HiddenInMinimap` and call SetNodeHitbox() to override
+// the rectangular hit area with a circle.
 struct NodeSettings {
-    bool  movable{true};
-    bool  hasInnerGraph{false};
-    bool  drawHoverHandle{false}; // draw a drag bar on top of the node when hovered (reroute-style nodes)
+    ImNodalNodeFlags flags{ImNodalNodeFlags_None};
     NodeSettings() = default;
 };
 
@@ -457,7 +538,8 @@ IMNODAL_API void Spring(float aWeight = 1.0f);
 // a hit area. The host can then draw its own mark at GetSlotScreenPos —
 // the "minimal button" pattern.
 struct SlotSettings {
-    uint32_t typeTag{0};   // user-chosen type tag (for M2 connection rules)
+    uint32_t typeTag{0};                              // user-chosen type tag (for M2 connection rules)
+    ImNodalSlotFlags flags{ImNodalSlotFlags_None};    // see ImNodalSlotFlags_
     SlotSettings() = default;
 };
 
@@ -756,40 +838,56 @@ IMNODAL_API void SlotSize(const ImVec2& aSizePx);
 IMNODAL_API void SlotPivotOffset(const ImVec2& aOffsetPx);
 
 // =====================================================================
+// Custom hitbox — override the rectangular hit area of a node or slot
+// =====================================================================
+// By default a node hovers when the mouse is inside its rect, and a slot
+// hovers when the mouse is inside its group rect. Hosts that draw odd
+// shapes (a circular reroute dot, a diamond decision node, a triangular
+// flow gate, ...) need the hit area to follow the visual instead of the
+// AABB. Call SetNodeHitbox / SetSlotHitbox between Begin* and End* to
+// supply a custom shape — ImNodal switches its hover/click test to that
+// shape for the rest of the frame.
+//
+// Coordinates are in SCREEN space. The shape is consumed at End*; it
+// resets to "no override" the next frame, just like SlotAlignment / Push*.
+//
+// Example — circular reroute node :
+//
+//     NodeSettings ns;
+//     ns.flags = ImNodalNodeFlags_NoBody | ImNodalNodeFlags_HiddenInMinimap;
+//     if (ImNodal::BeginNode(nodeId, &pos, ns)) {
+//         ImNodal::BeginSlot(slotId, ImNodal::SlotRole_InOut);
+//         ImGui::Dummy(ImVec2(2*r, 2*r));
+//         const ImVec2 c = ImGui::GetItemRectMin() + ImVec2(r, r);
+//         ImNodalHitbox hit;
+//         hit.type = ImNodalHitShape_Circle;
+//         hit.center = c;
+//         hit.radius = r + 6.0f;
+//         ImNodal::SetSlotHitbox(hit);
+//         ImNodal::EndSlot();
+//         ImNodal::SetNodeHitbox(hit);
+//         ImNodal::EndNode();
+//     }
+//     // Host paints the visible dot at `c` afterwards.
+//
+// Example — diamond decision node with one slot per corner :
+//     // Inside BeginNode, draw the diamond yourself, position 4 slots at
+//     // the corners using BeginH/V or absolute Dummy()s, and pass each
+//     // slot's hitbox as a small circle around its corner. Pass a 4-point
+//     // ConvexPolygon to SetNodeHitbox to make the whole diamond clickable.
+//
+// Convex polygons only — ConvexPolygon hitboxes are validated at the
+// SetSlotHitbox / SetNodeHitbox call via IM_ASSERT (debug only). Concave
+// polygons must be split by the host or replaced with a rect/circle.
+IMNODAL_API void SetSlotHitbox(const ImNodalHitbox& aHitbox);
+IMNODAL_API void SetNodeHitbox(const ImNodalHitbox& aHitbox);
+
+// =====================================================================
 // Navigation helpers
 // =====================================================================
 // Recenter (and optionally zoom) the canvas on the bounding box of all
 // nodes, or only the current selection. Call inside BeginCanvas scope.
 IMNODAL_API void NavigateToContent(bool aZoomToFit = true, float aMarginRatio = 0.1f);
 IMNODAL_API void NavigateToSelection(bool aZoomToFit = true, float aMarginRatio = 0.25f);
-
-// =====================================================================
-// Reroute node (M2)
-// =====================================================================
-// A minimal pass-through node : no header / body / footer, just one InOut
-// slot at the node center. Used to bend links. Still draggable, clicking +
-// dragging from the slot starts a new connection.
-//
-// Like BeginSlot/EndSlot, BeginRerouteNode/EndRerouteNode is CAPTURE-ONLY.
-// ImNodal sets up the node + slot, sizes the hit area to a circle of
-// `aHitRadius` around the slot pivot, and shows a hover-only drag handle.
-// The host renders the visible dot (and any selection ring it wants) AFTER
-// EndRerouteNode using GetSlotScreenPos / IsNodeSelected / IsSlotHovered.
-//
-//     ImNodal::BeginRerouteNode(nodeId, slotId, &pos);
-//     ImNodal::EndRerouteNode();
-//     const ImVec2 c = ImNodal::GetSlotScreenPos(slotId);
-//     auto* dl = ImGui::GetWindowDrawList();
-//     dl->AddCircleFilled(c, 5.0f, dotColor);
-//     if (ImNodal::IsNodeSelected(nodeId))
-//         dl->AddCircle(c, 11.0f, selBorderColor, 0, 1.5f);
-//
-// `aHitRadius` controls the circular hit zone of the reroute slot — keep
-// it close to the radius your host draws so the visible dot and the
-// clickable area match.
-IMNODAL_API bool BeginRerouteNode(Id aNodeId, Id aSlotId, ImVec2* apPos,
-                                  const NodeSettings& arSettings = {},
-                                  float aHitRadius = 5.0f);
-IMNODAL_API void EndRerouteNode();
 
 }  // namespace ImNodal
