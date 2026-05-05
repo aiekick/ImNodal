@@ -72,9 +72,22 @@ enum ImNodalCol_ {
     ImNodalCol_LinkPreviewAccept,  // wire color when AcceptNewLink fired
     ImNodalCol_LinkPreviewReject,  // wire color when RejectNewLink fired
     ImNodalCol_FlowDot,            // moving dot color along FlowLink
+    ImNodalCol_MiniMapBg,          // minimap background fill
+    ImNodalCol_MiniMapBorder,      // minimap outer frame
+    ImNodalCol_MiniMapNode,        // default fill for a node rect inside the minimap (used when NodeSettings::miniMapColor==0)
+    ImNodalCol_MiniMapViewport,    // rect outlining the visible canvas inside the minimap
     ImNodalCol_COUNT,
 };
 typedef int ImNodalCol;
+
+// Anchor corner for ShowMiniMap.
+enum ImNodalCorner_ {
+    ImNodalCorner_TopLeft = 0,
+    ImNodalCorner_TopRight,
+    ImNodalCorner_BottomLeft,
+    ImNodalCorner_BottomRight,
+};
+typedef int ImNodalCorner;
 
 enum ImNodalStyleVar_ {
     ImNodalStyleVar_NodeRounding = 0,       // float
@@ -342,6 +355,13 @@ struct NodeSettings {
 // aPos is IN/OUT in canvas space. When non-null and movable, dragging updates it.
 IMNODAL_API bool BeginNode(Id aNodeId, ImVec2* apPos, const NodeSettings& arSettings = {});
 IMNODAL_API void EndNode();
+
+// Set a "color" on the node currently open between BeginNode and EndNode.
+// Typical use : the host's accent / header color so the node is recognizable
+// in the minimap and other features that key off this color (future).
+// Resets to 0 at the next BeginNode — call every frame for the value to persist.
+// 0 = no custom color → consumers fall back on their own default.
+IMNODAL_API void SetNodeColor(ImU32 aColor);
 
 // =====================================================================
 // Layout primitives — H / V containers + Spring
@@ -655,6 +675,34 @@ IMNODAL_API int  GetActionContextLinks(Id* apoBuffer, int aCapacity);
 // curve. Speed is in canvas units per second. aColor==0 picks a default
 // accent based on the link color.
 IMNODAL_API void FlowLink(Id aLinkId, float aSpeed = 2.0f, ImU32 aColor = 0);
+
+// =====================================================================
+// MiniMap (overview window anchored to a corner of the canvas)
+// =====================================================================
+// Draws a scaled-down view of the current graph: each node as a rectangle
+// (using NodeSettings::miniMapColor or NodeBody color as fallback) plus a
+// frame outlining the visible canvas area. Call between BeginGraph and
+// EndGraph (after the nodes have been emitted so their last-frame screen
+// rects are up to date). Acts like a floating window above the graph: while
+// the cursor is over the minimap, ALL graph interactions (node hover/drag,
+// link click, slot connection, pan, box-select, bg context-menu) are
+// blocked. Click-or-drag inside the minimap recenters the canvas on the
+// pointed point (UE-style). Wheel zooms the canvas.
+
+struct MiniMapSettings {
+    ImVec2        size{180.0f, 120.0f};      // pixel size of the minimap rect
+    ImNodalCorner anchor{ImNodalCorner_TopRight};
+    ImVec2        offset{10.0f, 10.0f};       // px from the anchored corner
+    // Visual overrides — 0 means "use the matching Style color".
+    ImU32         bgColor{0};                 // ImNodalCol_MiniMapBg
+    ImU32         borderColor{0};             // ImNodalCol_MiniMapBorder
+    float         borderThickness{1.0f};
+    ImU32         viewportRectColor{0};       // ImNodalCol_MiniMapViewport
+    float         viewportRectThickness{1.5f};
+    MiniMapSettings() = default;
+};
+
+IMNODAL_API void ShowMiniMap(const MiniMapSettings& arSettings = {});
 
 // =====================================================================
 // Per-node draw lists (custom overlays under or above node content)

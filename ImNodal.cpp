@@ -90,6 +90,11 @@ struct NodeState {
     float lastFrameMaxToplevelNatHeight{0.0f};
     // Pointer to user's master copy of pos — updated on drag at EndNode
     ImVec2* userPosPtr{nullptr};
+    // Custom color set by ImNodal::SetNodeColor between BeginNode/EndNode
+    // (host's accent / header color). 0 = no custom color. Reset every frame
+    // at BeginNode. Read by the minimap and any future feature that wants
+    // to highlight nodes with a host-supplied color.
+    ImU32 color{0};
 };
 
 // =====================================================================
@@ -382,6 +387,16 @@ struct Context {
     // Set by ImNodal::NewFrame() to ImGui::GetFrameCount() so repeated calls
     // within the same frame are idempotent.
     int lastFrameReset{-1};
+
+    // -----------------------------
+    // MiniMap state
+    // -----------------------------
+    // Set by ShowMiniMap each frame ; gates graph hit-tests so the minimap
+    // behaves like a floating window over the graph (cursor over the minimap
+    // doesn't reach nodes/links/slots/pan/box-select beneath it).
+    ImRect lastMiniMapRect{};
+    bool   minimapHovered{false};
+    bool   minimapActive{false};   // true while LMB is held inside the minimap (drag-to-recenter)
 };
 
 namespace {
@@ -729,6 +744,10 @@ Style::Style() {
     Colors[ImNodalCol_LinkPreviewAccept] = IM_COL32(120, 255, 120, 230);
     Colors[ImNodalCol_LinkPreviewReject] = IM_COL32(255, 80, 80, 230);
     Colors[ImNodalCol_FlowDot] = IM_COL32(255, 220, 120, 255);
+    Colors[ImNodalCol_MiniMapBg] = IM_COL32(20, 20, 20, 200);
+    Colors[ImNodalCol_MiniMapBorder] = IM_COL32(180, 180, 180, 200);
+    Colors[ImNodalCol_MiniMapNode] = IM_COL32(140, 140, 140, 255);
+    Colors[ImNodalCol_MiniMapViewport] = IM_COL32(255, 200, 80, 220);
 
     NodeRounding = 4.0f;
     NodeBorderThickness = 1.5f;
@@ -887,6 +906,10 @@ IMNODAL_API const char* GetStyleColorName(ImNodalCol aIdx) {
         case ImNodalCol_LinkPreviewAccept: return "LinkPreviewAccept";
         case ImNodalCol_LinkPreviewReject: return "LinkPreviewReject";
         case ImNodalCol_FlowDot: return "FlowDot";
+        case ImNodalCol_MiniMapBg: return "MiniMapBg";
+        case ImNodalCol_MiniMapBorder: return "MiniMapBorder";
+        case ImNodalCol_MiniMapNode: return "MiniMapNode";
+        case ImNodalCol_MiniMapViewport: return "MiniMapViewport";
         default: return "Unknown";
     }
 }
@@ -1078,7 +1101,22 @@ IMNODAL_API bool BeginCanvas(const char* aId, const ImVec2& aSize, const CanvasS
     // Strict gate : ImGui window currently hovered AND mouse is geometrically
     // inside our widget rect. Without this, interactions of one canvas would
     // fire on top of another canvas / a side panel / another window.
-    rCtx.hovered = ImGui::IsWindowHovered() && mouseInWidget;
+    //
+    // ImGuiHoveredFlags_AllowWhenBlockedByActiveItem : without this flag,
+    // IsWindowHovered() returns false as soon as an item is held active
+    // (e.g. while dragging a slot to start a connection). That broke target
+    // slot detection : the dragged source had ActiveId, IsWindowHovered
+    // returned false, rCtx.hovered became false, the destination slot's
+    // mouseOnSlot was gated off, and currentHoveredSlot stayed 0 → no link
+    // could be completed.
+    //
+    // Also factor in the minimap state (set by the previous frame's
+    // ShowMiniMap call) so the cursor over the minimap doesn't trigger any
+    // graph hit-test or pan, and a drag started inside the minimap blocks
+    // the graph until released.
+    rCtx.hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
+                   && mouseInWidget
+                   && !rCtx.minimapHovered && !rCtx.minimapActive;
 
     s_saveInputState(rCtx);
     s_saveViewportState(rCtx);
@@ -1696,6 +1734,7 @@ IMNODAL_API bool BeginNode(Id aNodeId, ImVec2* apPos, const NodeSettings& arSett
     rNode.currentMaxToplevelNatHeight = 0.0f;
     rNode.rerouteSlotId = 0;
     rNode.userPosPtr = apPos;
+    rNode.color = 0;  // SetNodeColor between Begin/End writes here, reset each frame
 
     // Sync position from user's storage
     if (apPos != nullptr) {
@@ -1845,6 +1884,15 @@ IMNODAL_API void EndNode() {
     ImGui::PopID();
 
     rCtx.currentNodeId = 0;
+}
+
+IMNODAL_API void SetNodeColor(ImU32 aColor) {
+    Context& rCtx = s_getCtx();
+    IM_ASSERT(rCtx.currentNodeId != 0 && "SetNodeColor must be called between BeginNode/EndNode");
+    auto it = rCtx.nodes.find(rCtx.currentNodeId);
+    if (it == rCtx.nodes.end())
+        return;
+    it->second.color = aColor;
 }
 
 // =====================================================================
@@ -3262,6 +3310,254 @@ IMNODAL_API void FlowLink(Id aLinkId, float aSpeed, ImU32 aColor) {
 
     if (rCtx.graphActive)
         s_setChannel(rCtx, GC_Content);
+}
+
+// =====================================================================
+// MiniMap
+// =====================================================================
+// Floating overview anchored to a corner of the canvas. Acts like a
+// modal-ish window over the graph : while the cursor is over its rect,
+// rCtx.hovered is forced false (gate set in BeginCanvas the next frame),
+// so node/slot/link hit-tests, pan, box-select and bg menu are all blocked.
+// Drag inside the minimap recenters the canvas on the pointed point
+// (UE-style). Wheel zooms anchored on that same point.
+//
+// Coordinate model : we work in screen-space for layout/interactions
+// (mmScreen, mousePosBackup), then convert to canvas-space when feeding
+// the drawList because BeginCanvas is in local-space (drawList applies
+// screen = canvas * scale + viewTransformPos). Line thickness is also
+// scaled by invScale so the on-screen pixel size stays constant.
+
+IMNODAL_API void ShowMiniMap(const MiniMapSettings& arSettings) {
+    Context& rCtx = s_getCtx();
+    if (!rCtx.active || !rCtx.graphActive)
+        return;
+    if (arSettings.size.x <= 0.0f || arSettings.size.y <= 0.0f)
+        return;
+
+    const Style& s = rCtx.style;
+
+    // Match the minimap's aspect ratio to the canvas widget's. arSettings.size
+    // is the MAX bounding box budget ; we shrink the dimension that doesn't
+    // fit the canvas aspect. With matching aspects, projecting the widgetRect
+    // into the minimap is a clean uniform scale (no axis distortion, no
+    // precision bugs from independent x/y fits).
+    const ImVec2 wp = rCtx.widgetPos;
+    const ImVec2 ws = rCtx.widgetSize;
+    ImVec2 mmSize = arSettings.size;
+    if (ws.x > 0.0f && ws.y > 0.0f && mmSize.x > 0.0f && mmSize.y > 0.0f) {
+        const float canvasAspect = ws.y / ws.x;
+        const float mmAspect = mmSize.y / mmSize.x;
+        if (canvasAspect <= mmAspect) {
+            mmSize.y = mmSize.x * canvasAspect;
+        } else {
+            mmSize.x = mmSize.y / canvasAspect;
+        }
+    }
+
+    // Anchor the minimap rect to a corner of the canvas widget.
+    ImVec2 mmTL;
+    switch (arSettings.anchor) {
+        case ImNodalCorner_TopLeft:
+            mmTL = ImVec2(wp.x + arSettings.offset.x, wp.y + arSettings.offset.y);
+            break;
+        case ImNodalCorner_BottomLeft:
+            mmTL = ImVec2(wp.x + arSettings.offset.x, wp.y + ws.y - mmSize.y - arSettings.offset.y);
+            break;
+        case ImNodalCorner_BottomRight:
+            mmTL = ImVec2(wp.x + ws.x - mmSize.x - arSettings.offset.x,
+                          wp.y + ws.y - mmSize.y - arSettings.offset.y);
+            break;
+        case ImNodalCorner_TopRight:
+        default:
+            mmTL = ImVec2(wp.x + ws.x - mmSize.x - arSettings.offset.x,
+                          wp.y + arSettings.offset.y);
+            break;
+    }
+    const ImRect mmScreen(mmTL, mmTL + mmSize);
+    rCtx.lastMiniMapRect = mmScreen;
+
+    // CRITICAL : NodeState::lastScreenRect is misnamed — it's stored in
+    // CANVAS-SPACE (captured by EndNode while inside the local-space scope).
+    // widgetRect, mmScreen and mousePosBackup are in SCREEN-SPACE. We work
+    // in screen-space throughout and convert nodes via canvas→screen up-front
+    // (otherwise the projection compares two different spaces and the
+    // viewport rect doesn't line up with the visible nodes).
+    auto canvasToScreen = [&](const ImVec2& p) -> ImVec2 {
+        return ImVec2(p.x * rCtx.scale + rCtx.viewTransformPos.x,
+                      p.y * rCtx.scale + rCtx.viewTransformPos.y);
+    };
+
+    // Build the screen-space content bbox = union of nodes EMITTED THIS
+    // FRAME in the current graph. We iterate frameNodeOrder (the canonical
+    // "alive this frame" set) rather than rCtx.nodes which keeps every
+    // node ever seen.
+    // Empty graph fallback : the widget rect itself so the minimap still
+    // has SOMETHING to show.
+    GraphState& rGraph = rCtx.graphs[rCtx.currentGraphId];
+    ImRect bbox(ImVec2(FLT_MAX, FLT_MAX), ImVec2(-FLT_MAX, -FLT_MAX));
+    int nodeCount = 0;
+    for (Id nid : rGraph.frameNodeOrder) {
+        auto it = rCtx.nodes.find(nid);
+        if (it == rCtx.nodes.end())
+            continue;
+        const ImRect& nr_canvas = it->second.lastScreenRect;
+        if (nr_canvas.GetWidth() <= 0.0f || nr_canvas.GetHeight() <= 0.0f)
+            continue;
+        const ImVec2 nMin = canvasToScreen(nr_canvas.Min);
+        const ImVec2 nMax = canvasToScreen(nr_canvas.Max);
+        if (nMin.x < bbox.Min.x) bbox.Min.x = nMin.x;
+        if (nMin.y < bbox.Min.y) bbox.Min.y = nMin.y;
+        if (nMax.x > bbox.Max.x) bbox.Max.x = nMax.x;
+        if (nMax.y > bbox.Max.y) bbox.Max.y = nMax.y;
+        ++nodeCount;
+    }
+    if (nodeCount == 0) {
+        bbox = rCtx.widgetRect;
+    }
+    bbox.Expand(40.0f);
+
+    // Fit the bbox inside the minimap, preserving aspect ratio.
+    const ImVec2 bSize = bbox.Max - bbox.Min;
+    if (bSize.x <= 0.0f || bSize.y <= 0.0f) {
+        return;  // degenerate
+    }
+    const float fitX = mmSize.x / bSize.x;
+    const float fitY = mmSize.y / bSize.y;
+    const float fit = ImMin(fitX, fitY);
+    const ImVec2 contentSize(bSize.x * fit, bSize.y * fit);
+    const ImVec2 mmContentTL(mmTL.x + (mmSize.x - contentSize.x) * 0.5f,
+                             mmTL.y + (mmSize.y - contentSize.y) * 0.5f);
+
+    auto screenToMM = [&](const ImVec2& p) -> ImVec2 {
+        return ImVec2(mmContentTL.x + (p.x - bbox.Min.x) * fit,
+                      mmContentTL.y + (p.y - bbox.Min.y) * fit);
+    };
+    auto mmToScreen = [&](const ImVec2& mp) -> ImVec2 {
+        return ImVec2(bbox.Min.x + (mp.x - mmContentTL.x) / fit,
+                      bbox.Min.y + (mp.y - mmContentTL.y) / fit);
+    };
+
+    // Interactions : mouse positions in screen-space (mousePosBackup is the
+    // raw screen coord saved before s_enterLocalSpace).
+    const ImVec2 mouseScreen = rCtx.mousePosBackup;
+    const bool overMiniMap = mmScreen.Contains(mouseScreen);
+
+    const bool lmbClicked  = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const bool lmbDown     = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    const bool lmbReleased = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+
+    // Update the gate flags read by the next BeginCanvas (1-frame lag is
+    // imperceptible at 60 fps and avoids ordering constraints between
+    // ShowMiniMap and the node/link emission inside the same scope).
+    rCtx.minimapHovered = overMiniMap;
+
+    if (overMiniMap && lmbClicked) {
+        rCtx.minimapActive = true;
+    }
+    // SetCanvasView/CenterCanvasOn internally call s_leaveLocalSpace which
+    // asserts the splitter is on `expectedChannel`. Since we're inside a
+    // BeginGraph scope (splitter active, current = GC_Content), the assert
+    // would fire. Save the current channel, switch to expectedChannel for
+    // the call, then restore. graphActive is always true here (we returned
+    // earlier otherwise), so the splitter is always active.
+    auto* const dlForView = rCtx.drawList;
+    auto withExpectedChannel = [&](auto&& fn) {
+        const int saved = dlForView->_Splitter._Current;
+        if (saved != rCtx.expectedChannel)
+            dlForView->ChannelsSetCurrent(rCtx.expectedChannel);
+        fn();
+        if (saved != dlForView->_Splitter._Current)
+            dlForView->ChannelsSetCurrent(saved);
+    };
+    if (rCtx.minimapActive) {
+        if (lmbDown) {
+            // UE-style : recenter the canvas so the screen point under the
+            // cursor (= the equivalent canvas point) becomes the widget
+            // center. Keeps the current scale.
+            const ImVec2 targetScreen = mmToScreen(mouseScreen);
+            const ImVec2 canvasP = (targetScreen - rCtx.viewTransformPos) * rCtx.invScale;
+            withExpectedChannel([&]{ CenterCanvasOn(canvasP); });
+        }
+        if (lmbReleased) {
+            rCtx.minimapActive = false;
+        }
+    }
+    if (overMiniMap) {
+        const float wheel = ImGui::GetIO().MouseWheel;
+        if (wheel != 0.0f) {
+            const float newScale = ImClamp(rCtx.scale + wheel * rCtx.settings.zoomStep,
+                                           rCtx.settings.zoomMin, rCtx.settings.zoomMax);
+            if (newScale > 0.0f && newScale != rCtx.scale) {
+                const ImVec2 targetScreen = mmToScreen(mouseScreen);
+                const ImVec2 canvasP = (targetScreen - rCtx.viewTransformPos) * rCtx.invScale;
+                const ImVec2 newOrigin = targetScreen - rCtx.widgetPos - canvasP * newScale;
+                withExpectedChannel([&]{ SetCanvasView(newOrigin, newScale); });
+            }
+        }
+    }
+
+    // Render on overlay channel. Coords are converted to canvas-space and
+    // line thicknesses scaled by invScale so the on-screen pixel size is
+    // preserved regardless of zoom.
+    auto* const dl = rCtx.drawList;
+    s_setChannel(rCtx, GC_Overlay);
+
+    auto sc = [&](const ImVec2& p) -> ImVec2 {
+        return (p - rCtx.viewTransformPos) * rCtx.invScale;
+    };
+    const float lineSc = rCtx.invScale;
+
+    const ImU32 bgCol = arSettings.bgColor != 0 ? arSettings.bgColor : s.Colors[ImNodalCol_MiniMapBg];
+    const ImU32 brCol = arSettings.borderColor != 0 ? arSettings.borderColor : s.Colors[ImNodalCol_MiniMapBorder];
+    const ImU32 vpCol = arSettings.viewportRectColor != 0 ? arSettings.viewportRectColor : s.Colors[ImNodalCol_MiniMapViewport];
+    const ImU32 nodeFallback = s.Colors[ImNodalCol_MiniMapNode];
+
+    // BG fill
+    dl->AddRectFilled(sc(mmScreen.Min), sc(mmScreen.Max), bgCol);
+
+    // Node boxes (no slots, no titles — just the rectangle with the host's
+    // accent color when set, else the default minimap node color). Iterate
+    // frameNodeOrder so we never paint stale nodes. lastScreenRect is in
+    // CANVAS-SPACE so we convert to screen-space before projecting.
+    for (Id nid : rGraph.frameNodeOrder) {
+        auto it = rCtx.nodes.find(nid);
+        if (it == rCtx.nodes.end())
+            continue;
+        const NodeState& n = it->second;
+        if (n.isReroute)
+            continue;
+        const ImRect& nr_canvas = n.lastScreenRect;
+        if (nr_canvas.GetWidth() <= 0.0f)
+            continue;
+        const ImVec2 nMin = canvasToScreen(nr_canvas.Min);
+        const ImVec2 nMax = canvasToScreen(nr_canvas.Max);
+        const ImVec2 a = screenToMM(nMin);
+        const ImVec2 b = screenToMM(nMax);
+        const ImU32 col = n.color != 0 ? n.color : nodeFallback;
+        dl->AddRectFilled(sc(a), sc(b), col);
+    }
+
+    // Viewport rect (current canvas widget projected into the minimap),
+    // clipped to the minimap's own rect so it doesn't bleed outside.
+    {
+        ImVec2 va = screenToMM(rCtx.widgetRect.Min);
+        ImVec2 vb = screenToMM(rCtx.widgetRect.Max);
+        if (va.x < mmScreen.Min.x) va.x = mmScreen.Min.x;
+        if (va.y < mmScreen.Min.y) va.y = mmScreen.Min.y;
+        if (vb.x > mmScreen.Max.x) vb.x = mmScreen.Max.x;
+        if (vb.y > mmScreen.Max.y) vb.y = mmScreen.Max.y;
+        if (vb.x > va.x && vb.y > va.y) {
+            dl->AddRect(sc(va), sc(vb), vpCol, 0.0f, 0,
+                        arSettings.viewportRectThickness * lineSc);
+        }
+    }
+
+    // Border
+    dl->AddRect(sc(mmScreen.Min), sc(mmScreen.Max), brCol, 0.0f, 0,
+                arSettings.borderThickness * lineSc);
+
+    s_setChannel(rCtx, GC_Content);
 }
 
 // =====================================================================

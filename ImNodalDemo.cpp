@@ -98,6 +98,10 @@ struct DemoState {
     bool showStyleColors{false};
     bool showStyleVars{false};
 
+    // MiniMap toggle + tweakable settings.
+    bool          miniMapEnabled{true};
+    MiniMapSettings miniMap{};
+
     // QueryNewNodeFromSlot → popup state
     Id pendingNewFromSlot{0};
     ImVec2 pendingNewPos{};
@@ -421,6 +425,7 @@ inline void DemoRenderNode(DemoNode& n) {
     NodeSettings ns;
     if (!BeginNode(n.id, &n.pos, ns))
         return;
+    SetNodeColor(n.headerCol);  // accent color, picked up by the minimap (and future features)
 
     ImVec2 headerMin, headerMax;
     if (n.verticalIO) {
@@ -589,6 +594,12 @@ inline void DemoDrawCanvas(DemoState& st) {
             EndDelete();
         }
 
+        // MiniMap on top of the graph (call AFTER nodes so their last-frame
+        // screen rects are populated).
+        if (st.miniMapEnabled) {
+            ShowMiniMap(st.miniMap);
+        }
+
         EndGraph();
     }
     EndCanvas();
@@ -704,6 +715,48 @@ inline void DemoSectionFlow(DemoState& st) {
     ImGui::Text("Flowing : %d / %d link(s)", flowing, (int)st.links.size());
 }
 
+inline void DemoSectionMiniMap(DemoState& st) {
+    ImGui::Checkbox("Enabled", &st.miniMapEnabled);
+    ImGui::TextDisabled("Click/drag in the map to recenter (UE-style).");
+    ImGui::TextDisabled("Wheel inside the map to zoom.");
+    ImGui::Spacing();
+
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::SliderFloat2("Size", &st.miniMap.size.x, 60.0f, 400.0f, "%.0f px");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::SliderFloat2("Offset", &st.miniMap.offset.x, 0.0f, 80.0f, "%.0f px");
+
+    static const char* kAnchorLabels[] = {"Top-Left", "Top-Right", "Bottom-Left", "Bottom-Right"};
+    int a = (int)st.miniMap.anchor;
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::Combo("Anchor", &a, kAnchorLabels, IM_ARRAYSIZE(kAnchorLabels))) {
+        st.miniMap.anchor = (ImNodalCorner)a;
+    }
+
+    // Background : transparency slider on the alpha channel of bgColor.
+    ImVec4 bg = ImGui::ColorConvertU32ToFloat4(
+        st.miniMap.bgColor != 0 ? st.miniMap.bgColor : GetStyleColorU32(ImNodalCol_MiniMapBg));
+    if (ImGui::ColorEdit4("Bg color", &bg.x, ImGuiColorEditFlags_AlphaBar)) {
+        st.miniMap.bgColor = ImGui::ColorConvertFloat4ToU32(bg);
+    }
+
+    ImVec4 br = ImGui::ColorConvertU32ToFloat4(
+        st.miniMap.borderColor != 0 ? st.miniMap.borderColor : GetStyleColorU32(ImNodalCol_MiniMapBorder));
+    if (ImGui::ColorEdit4("Border", &br.x, ImGuiColorEditFlags_AlphaBar)) {
+        st.miniMap.borderColor = ImGui::ColorConvertFloat4ToU32(br);
+    }
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::SliderFloat("Border thick.", &st.miniMap.borderThickness, 0.5f, 6.0f, "%.1f px");
+
+    ImVec4 vp = ImGui::ColorConvertU32ToFloat4(
+        st.miniMap.viewportRectColor != 0 ? st.miniMap.viewportRectColor : GetStyleColorU32(ImNodalCol_MiniMapViewport));
+    if (ImGui::ColorEdit4("Viewport rect", &vp.x, ImGuiColorEditFlags_AlphaBar)) {
+        st.miniMap.viewportRectColor = ImGui::ColorConvertFloat4ToU32(vp);
+    }
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::SliderFloat("Viewport thick.", &st.miniMap.viewportRectThickness, 0.5f, 6.0f, "%.1f px");
+}
+
 inline void DemoSectionSelection(DemoState& /*st*/) {
     Id selN[64];
     Id selL[64];
@@ -795,6 +848,8 @@ IMNODAL_API void ShowDemoWindow(bool* apoOpen) {
         DemoSectionReroutes(s_demo);
     if (ImGui::CollapsingHeader("Flow animation"))
         DemoSectionFlow(s_demo);
+    if (ImGui::CollapsingHeader("MiniMap"))
+        DemoSectionMiniMap(s_demo);
     if (ImGui::CollapsingHeader("Selection / hover"))
         DemoSectionSelection(s_demo);
     if (ImGui::CollapsingHeader("Slot anatomy"))
