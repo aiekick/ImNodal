@@ -2378,8 +2378,10 @@ IMNODAL_API void EndSlot() {
     // lives (inside a node section, inline in a window, ...). ButtonBehavior
     // handles hover/click/ActiveId; the host window won't move because the
     // slot owns ActiveId once held.
-    ImGuiWindow* const pWindow = ImGui::GetCurrentWindow();
-    const ImGuiID hitId = pWindow->GetID("##imnodal_slot_hit");
+    // ID derived from the slot's logical Id (not from the ImGui ID stack):
+    // a window->GetID("##fixed") collides across slots when the host code
+    // between Begin/EndSlot perturbs the current window context.
+    const ImGuiID hitId = ImHashStr("##imnodal_slot_hit", 0, s_imguiId(rCtx.currentSlotId));
     ImGui::KeepAliveID(hitId);
     bool btnHovered = false, btnHeld = false;
     if (ImGui::ItemAdd(hitBB, hitId)) {
