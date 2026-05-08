@@ -85,7 +85,7 @@ struct NodeState {
     // means "use the rectangular nodeMin/nodeMax for hover/click tests" (the
     // legacy behavior). Otherwise the shape drives hit-tests.
     ImNodalHitbox customHitbox{};
-    // Max natural width/height of all TOP-LEVEL BeginH/V containers emitted
+    // Max natural width/height of all TOP-LEVEL BeginLayoutHorizontal/Vertical containers emitted
     // inside this node. Used by "fill parent" mode of subsequent toplevel
     // containers to size against their siblings rather than against
     // node.size — avoids the self-referential feedback that would bake the
@@ -106,7 +106,7 @@ struct NodeState {
 // =====================================================================
 // Layout primitives — H/V containers + Spring (state)
 // =====================================================================
-// Active stack frame. One entry per open BeginH/BeginV in the current node.
+// Active stack frame. One entry per open BeginLayoutHorizontal/BeginLayoutVertical in the current node.
 struct LayoutContainer {
     ImGuiID id{0};
     bool isHorizontal{true};
@@ -124,7 +124,7 @@ struct LayoutContainer {
 
 // Per-id persistent slot (survives across frames). Stores the natural size
 // (= sum of non-Spring children's widths/heights) and the sum of Spring
-// weights measured at the previous EndH/EndV — used by Spring this frame
+// weights measured at the previous EndLayoutHorizontal/Vertical — used by LayoutSpring this frame
 // to compute its share of the gap.
 struct LayoutSlot {
     float lastNatWidth{0.0f};
@@ -377,14 +377,14 @@ struct Context {
     ImNodalHitbox stagingNodeHitbox{};
 
     // -----------------------------
-    // BeginH/V/Spring layout primitives
+    // BeginLayoutHorizontal/Vertical/Group + LayoutSpring layout primitives
     // -----------------------------
-    // Active container stack (one entry per open BeginH/V at the current
-    // moment). Empty between EndNode and the next BeginNode.
+    // Active container stack (one entry per open BeginLayoutHorizontal/Vertical
+    // at the current moment). Empty between EndNode and the next BeginNode.
     std::vector<LayoutContainer> layoutStack;
-    // Persistent natural-size cache, keyed by ImGui scope ID. Spring at
-    // frame N reads this to compute its fill ; EndH/EndV writes it for next
-    // frame.
+    // Persistent natural-size cache, keyed by ImGui scope ID. LayoutSpring at
+    // frame N reads this to compute its fill ; EndLayoutHorizontal/Vertical
+    // writes it for next frame.
     std::unordered_map<ImGuiID, LayoutSlot> layoutSlots;
 
     // -----------------------------
@@ -468,7 +468,7 @@ static void s_doNewFrame(Context& arCtx) {
     arCtx.stagingNodeHitbox = ImNodalHitbox{};
 
     // Layout primitive : drop any leftover container from a previous frame
-    // where the host forgot an EndH/EndV. Persistent layoutSlots survive.
+    // where the host forgot an EndLayoutHorizontal/Vertical. Persistent layoutSlots survive.
     arCtx.layoutStack.clear();
 
     for (auto& kv : arCtx.slots) {
@@ -1932,7 +1932,7 @@ IMNODAL_API bool BeginNode(Id aNodeId, ImVec2* apPos, const NodeSettings& arSett
 IMNODAL_API void EndNode() {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.currentNodeId != 0 && "EndNode without matching BeginNode");
-    IM_ASSERT(rCtx.layoutStack.empty() && "EndNode while a BeginH/BeginV is still open");
+    IM_ASSERT(rCtx.layoutStack.empty() && "EndNode while a BeginLayoutHorizontal/BeginLayoutVertical is still open");
     // Defensive : drop any leftover container so the next frame doesn't
     // inherit a corrupt stack even if assertions were compiled out.
     rCtx.layoutStack.clear();
@@ -2073,7 +2073,7 @@ IMNODAL_API void SetNodeColor(ImU32 aColor) {
 }
 
 // =====================================================================
-// Layout primitives — BeginH/EndH/BeginV/EndV/Spring
+// Layout primitives — BeginLayoutHorizontal/Vertical/Group + LayoutSpring
 // =====================================================================
 namespace {
 
@@ -2127,8 +2127,8 @@ inline void s_emitChildSameLineIfH(Context& arCtx) {
 }
 
 inline bool s_beginLayout(Context& arCtx, const char* aId, const ImVec2& aSize, bool aHorizontal) {
-    IM_ASSERT(arCtx.currentNodeId != 0 && "BeginH/V must be called inside BeginNode/EndNode");
-    IM_ASSERT(aId != nullptr && "BeginH/V: id must be non-null");
+    IM_ASSERT(arCtx.currentNodeId != 0 && "BeginLayoutHorizontal/Vertical must be called inside BeginNode/EndNode");
+    IM_ASSERT(aId != nullptr && "BeginLayoutHorizontal/Vertical: id must be non-null");
 
     s_emitChildSameLineIfH(arCtx);
 
@@ -2151,9 +2151,9 @@ inline bool s_beginLayout(Context& arCtx, const char* aId, const ImVec2& aSize, 
 }
 
 inline void s_endLayout(Context& arCtx, bool aHorizontal) {
-    IM_ASSERT(!arCtx.layoutStack.empty() && "EndH/V without matching BeginH/V");
+    IM_ASSERT(!arCtx.layoutStack.empty() && "EndLayoutHorizontal/Vertical without matching BeginLayoutHorizontal/Vertical");
     LayoutContainer c = arCtx.layoutStack.back();
-    IM_ASSERT(c.isHorizontal == aHorizontal && "EndH while a BeginV is open (or vice versa)");
+    IM_ASSERT(c.isHorizontal == aHorizontal && "EndLayoutHorizontal while a BeginLayoutVertical is open (or vice versa)");
     arCtx.layoutStack.pop_back();
 
     ImGui::EndGroup();
@@ -2192,22 +2192,32 @@ inline void s_endLayout(Context& arCtx, bool aHorizontal) {
 
 }  // namespace
 
-IMNODAL_API bool BeginH(const char* aId, const ImVec2& aSize) {
+IMNODAL_API bool BeginLayoutHorizontal(const char* aId, const ImVec2& aSize) {
     return s_beginLayout(s_getCtx(), aId, aSize, /*horizontal=*/true);
 }
-IMNODAL_API void EndH() {
+IMNODAL_API void EndLayoutHorizontal() {
     s_endLayout(s_getCtx(), /*horizontal=*/true);
 }
-IMNODAL_API bool BeginV(const char* aId, const ImVec2& aSize) {
+IMNODAL_API bool BeginLayoutVertical(const char* aId, const ImVec2& aSize) {
     return s_beginLayout(s_getCtx(), aId, aSize, /*horizontal=*/false);
 }
-IMNODAL_API void EndV() {
+IMNODAL_API void EndLayoutVertical() {
     s_endLayout(s_getCtx(), /*horizontal=*/false);
 }
 
-IMNODAL_API void Spring(float aWeight) {
+IMNODAL_API bool BeginLayoutGroup() {
     Context& rCtx = s_getCtx();
-    IM_ASSERT(!rCtx.layoutStack.empty() && "Spring outside of BeginH/BeginV scope");
+    s_emitChildSameLineIfH(rCtx);  // no-op si layoutStack vide ou si parent vertical
+    ImGui::BeginGroup();
+    return true;
+}
+IMNODAL_API void EndLayoutGroup() {
+    ImGui::EndGroup();
+}
+
+IMNODAL_API void LayoutSpring(float aWeight) {
+    Context& rCtx = s_getCtx();
+    IM_ASSERT(!rCtx.layoutStack.empty() && "LayoutSpring outside of BeginLayoutHorizontal/BeginLayoutVertical scope");
     if (aWeight <= 0.0f) {
         return;
     }
@@ -2232,8 +2242,8 @@ IMNODAL_API void Spring(float aWeight) {
 
     // Always emit a Dummy (even with fill == 0) so CursorPosPrevLine points
     // at the right spot for the next sibling's implicit SameLine. Without
-    // this, a 0-fill Spring still increments childCount and the next BeginV
-    // SameLine(0,0)s back to BEFORE the parent BeginH (= the previous line),
+    // this, a 0-fill Spring still increments childCount and the next BeginLayoutVertical
+    // SameLine(0,0)s back to BEFORE the parent BeginLayoutHorizontal (= the previous line),
     // which dumps the next sibling on top of the previous block.
     if (c.isHorizontal) {
         ImGui::Dummy(ImVec2(fill, 0.0f));

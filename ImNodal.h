@@ -357,25 +357,26 @@ IMNODAL_API void DrawCanvasGrid();
 // =====================================================================
 // Design philosophy : the slot is the primitive. Nodes are draggable /
 // selectable containers, but ImNodal does NOT impose any layout — the host
-// assembles its node content with BeginH/EndH/BeginV/EndV/Spring (see the
-// "Layout primitives" section below). A slot can be emitted ANYWHERE :
-// inside a node, inside a plain ImGui window, inline with text…
+// assembles its node content with BeginLayoutHorizontal / BeginLayoutVertical
+// / LayoutSpring / BeginLayoutGroup (see the "Layout primitives" section
+// below). A slot can be emitted ANYWHERE : inside a node, inside a plain
+// ImGui window, inline with text…
 //
 // Usage :
 //
 //     if (BeginCanvas("c", size, canvasSettings)) {
 //         if (BeginGraph(graphId, graphSettings)) {
 //             if (BeginNode(nodeId, &pos, nodeSettings)) {
-//                 BeginH("##header");
-//                     Spring();
-//                     ImGui::TextUnformatted("Title");
-//                     Spring();
-//                 EndH();
-//                 BeginH("##body");
+//                 BeginLayoutHorizontal("##header");
+//                     LayoutSpring();
+//                     BeginLayoutGroup(); ImGui::TextUnformatted("Title"); EndLayoutGroup();
+//                     LayoutSpring();
+//                 EndLayoutHorizontal();
+//                 BeginLayoutHorizontal("##body");
 //                     if (BeginInputSlot(in_id))  { ImGui::Text("A");   EndSlot(); }
-//                     Spring();
+//                     LayoutSpring();
 //                     if (BeginOutputSlot(out_id)) { ImGui::Text("Out"); EndSlot(); }
-//                 EndH();
+//                 EndLayoutHorizontal();
 //                 EndNode();
 //             }
 //             EndGraph();
@@ -418,8 +419,8 @@ IMNODAL_API Id   GetCurrentGraphId();
 // BeginNode/EndNode opens a draggable, selectable, hit-testable rect at
 // the canvas position pointed to by `apPos`. ImNodal paints the body fill
 // (ImNodalCol_NodeBody) and the border (NodeBorder / NodeBorderSelected)
-// inside EndNode — nothing else. Use the layout primitives BeginH/V/Spring
-// to assemble the content. Headers, footers, columns, and any tinted band
+// inside EndNode — nothing else. Use the layout primitives BeginLayoutHorizontal /
+// BeginLayoutVertical / LayoutSpring / BeginLayoutGroup to assemble the content. Headers, footers, columns, and any tinted band
 // are the host's responsibility (paint via GetNodeBackgroundDrawList).
 //
 // Behaviors are packed in `flags` — see ImNodalNodeFlags_. Combine with
@@ -445,53 +446,85 @@ IMNODAL_API void EndNode();
 IMNODAL_API void SetNodeColor(ImU32 aColor);
 
 // =====================================================================
-// Layout primitives — H / V containers + Spring
+// Layout primitives — Horizontal / Vertical containers + Spring + Group
 // =====================================================================
 // Generic stack-layout containers usable ONLY inside a BeginNode/EndNode
 // scope. Lets the host assemble a node's content with horizontal /
-// vertical containers and `Spring()` distributing the remaining space —
-// equivalent in spirit to thedmd's BeginHorizontal/Vertical/Spring (but
-// scoped to ImNodal nodes only, no global ImGui pollution).
+// vertical containers and `LayoutSpring()` distributing the remaining
+// space — equivalent in spirit to thedmd's BeginHorizontal/Vertical/Spring
+// (but scoped to ImNodal nodes only, no global ImGui pollution).
 //
 // `aSize.x` and `aSize.y` semantics, per axis :
 //     > 0  : forced size in pixels
 //     == 0 : natural size (= sum of non-Spring children measured at the
-//            previous frame). Spring() inside is a no-op.
+//            previous frame). LayoutSpring() inside is a no-op.
 //     < 0  : fill parent. At the top of a node body that means
 //            `node.size.x - 2 * NodeBodyPadding` (or .y) measured at the
 //            previous frame. First frame falls back to natural.
 //
-// Spring(weight) emits a `ImGui::Dummy` of the size needed to reach the
-// container's target along its main axis, then `SameLine(0, 0)` for
-// horizontal containers. Phase 1 supports a single Spring per container ;
-// multi-Spring + weights distribution comes later.
+// LayoutSpring(weight) emits a `ImGui::Dummy` of the size needed to reach
+// the container's target along its main axis, then `SameLine(0, 0)` for
+// horizontal containers. Multi-Spring + weights distribution is supported
+// (each Spring takes its proportional share of the gap, sum of weights
+// measured the previous frame).
+//
+// IMPORTANT — bare ImGui widgets do NOT auto-SameLine inside
+// BeginLayoutHorizontal. The auto-SameLine machinery is triggered by
+// nested BeginLayout* / LayoutSpring / BeginLayoutGroup calls only. Wrap
+// any bare widget in BeginLayoutGroup/EndLayoutGroup (see below) so it
+// counts as a layout child.
 //
 // Typical node layout :
 //
-//     ImNodal::BeginV("##node", ImVec2(-1.0f, 0.0f));
+//     ImNodal::BeginLayoutVertical("##node", ImVec2(-1.0f, 0.0f));
 //         // header centered on the node width
-//         ImNodal::BeginH("##header");
-//             ImNodal::Spring();
-//             ImGui::TextUnformatted("Node title");
-//             ImNodal::Spring();
-//         ImNodal::EndH();
+//         ImNodal::BeginLayoutHorizontal("##header");
+//             ImNodal::LayoutSpring();
+//             ImNodal::BeginLayoutGroup();
+//                 ImGui::TextUnformatted("Node title");
+//             ImNodal::EndLayoutGroup();
+//             ImNodal::LayoutSpring();
+//         ImNodal::EndLayoutHorizontal();
 //
 //         // body : inputs left, outputs right, Spring between
-//         ImNodal::BeginH("##body");
+//         ImNodal::BeginLayoutHorizontal("##body");
 //             for (auto& s : inputs) draw_slot(s);
-//             ImNodal::Spring();
+//             ImNodal::LayoutSpring();
 //             for (auto& s : outputs) draw_slot(s);
-//         ImNodal::EndH();
-//     ImNodal::EndV();
+//         ImNodal::EndLayoutHorizontal();
+//     ImNodal::EndLayoutVertical();
 //
 // EndNode asserts the layout stack is empty (host must close every
 // container it opened). NewFrame clears any leftover state from a missing
-// EndH/EndV the previous frame.
-IMNODAL_API bool BeginH(const char* aId, const ImVec2& aSize = ImVec2(-1.0f, 0.0f));
-IMNODAL_API void EndH();
-IMNODAL_API bool BeginV(const char* aId, const ImVec2& aSize = ImVec2(0.0f, -1.0f));
-IMNODAL_API void EndV();
-IMNODAL_API void Spring(float aWeight = 1.0f);
+// EndLayoutHorizontal/EndLayoutVertical the previous frame.
+IMNODAL_API bool BeginLayoutHorizontal(const char* aId, const ImVec2& aSize = ImVec2(-1.0f, 0.0f));
+IMNODAL_API void EndLayoutHorizontal();
+IMNODAL_API bool BeginLayoutVertical(const char* aId, const ImVec2& aSize = ImVec2(0.0f, -1.0f));
+IMNODAL_API void EndLayoutVertical();
+IMNODAL_API void LayoutSpring(float aWeight = 1.0f);
+
+// Wrap any bare ImGui widget(s) so they count as a single child of the
+// enclosing BeginLayoutHorizontal / BeginLayoutVertical. Without this,
+// `ImGui::Dummy(...)`, `ImGui::TextUnformatted(...)`, `ImGui::Button(...)`
+// etc. don't trigger the auto-SameLine that BeginLayout* uses to chain
+// children — the bare widget falls on the next line.
+//
+// Inside : the host emits any ImGui calls. The whole content is wrapped
+// in `ImGui::BeginGroup`/`ImGui::EndGroup` so it's treated as a single
+// layout unit with a measurable rect (useful when the host wants to query
+// `ImGui::GetItemRectMin/Max` after `EndLayoutGroup`).
+//
+// No-op outside of a BeginLayout* scope — safe to use unconditionally.
+//
+// Example :
+//
+//     BeginLayoutHorizontal("row");
+//         BeginLayoutGroup();   ImGui::Dummy(ImVec2(12,12));      EndLayoutGroup();
+//         BeginLayoutGroup();   ImGui::TextUnformatted("label");  EndLayoutGroup();
+//         LayoutSpring(1.0f);
+//     EndLayoutHorizontal();
+IMNODAL_API bool BeginLayoutGroup();
+IMNODAL_API void EndLayoutGroup();
 
 // -----------------------------
 // Slot (primitive — usable anywhere)
@@ -872,7 +905,7 @@ IMNODAL_API void SlotPivotOffset(const ImVec2& aOffsetPx);
 //
 // Example — diamond decision node with one slot per corner :
 //     // Inside BeginNode, draw the diamond yourself, position 4 slots at
-//     // the corners using BeginH/V or absolute Dummy()s, and pass each
+//     // the corners using BeginLayoutHorizontal/Vertical or absolute Dummy()s, and pass each
 //     // slot's hitbox as a small circle around its corner. Pass a 4-point
 //     // ConvexPolygon to SetNodeHitbox to make the whole diamond clickable.
 //

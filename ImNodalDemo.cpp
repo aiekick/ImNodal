@@ -430,58 +430,68 @@ inline void DemoRenderNode(DemoNode& n) {
     ImVec2 headerMin, headerMax;
     if (n.verticalIO) {
         // Layout vertical : top inputs row, header, body, bottom outputs row.
-        BeginV("##vroot");
+        BeginLayoutVertical("##vroot");
             if (!n.inputs.empty()) {
-                BeginH("##in_row");
+                BeginLayoutHorizontal("##in_row");
                     for (auto& s : n.inputs) DemoEmitSlot(SlotRole_Input, s, true);
-                EndH();
+                EndLayoutHorizontal();
             }
-            BeginH("##header_v");
-                Spring();
-                ImGui::TextUnformatted(n.title);
-                Spring();
-            EndH();
+            BeginLayoutHorizontal("##header_v");
+                LayoutSpring();
+                // BeginLayoutGroup wraps the bare ImGui widget so it counts
+                // as a layout child (auto-SameLine via s_emitChildSameLineIfH).
+                BeginLayoutGroup();
+                    ImGui::TextUnformatted(n.title);
+                EndLayoutGroup();
+                LayoutSpring();
+            EndLayoutHorizontal();
             headerMin = ImGui::GetItemRectMin();
             headerMax = ImGui::GetItemRectMax();
             if (n.hasBody) {
-                ImGui::SetNextItemWidth(80);
-                ImGui::SliderFloat("##v", &n.bodyValue, 0.0f, 1.0f);
+                BeginLayoutGroup();
+                    ImGui::SetNextItemWidth(80);
+                    ImGui::SliderFloat("##v", &n.bodyValue, 0.0f, 1.0f);
+                EndLayoutGroup();
             }
             if (!n.outputs.empty()) {
-                BeginH("##out_row");
+                BeginLayoutHorizontal("##out_row");
                     for (auto& s : n.outputs) DemoEmitSlot(SlotRole_Output, s, true);
-                EndH();
+                EndLayoutHorizontal();
             }
-        EndV();
+        EndLayoutVertical();
     } else {
-        BeginH("##header");
-            Spring();
-            ImGui::TextUnformatted(n.title);
-            Spring();
-        EndH();
+        BeginLayoutHorizontal("##header");
+            LayoutSpring();
+            BeginLayoutGroup();
+                ImGui::TextUnformatted(n.title);
+            EndLayoutGroup();
+            LayoutSpring();
+        EndLayoutHorizontal();
         headerMin = ImGui::GetItemRectMin();
         headerMax = ImGui::GetItemRectMax();
 
-        BeginH("##body");
+        BeginLayoutHorizontal("##body");
             if (!n.inputs.empty()) {
-                BeginV("##in");
+                BeginLayoutVertical("##in");
                     for (auto& s : n.inputs) DemoEmitSlot(SlotRole_Input, s, false);
-                EndV();
+                EndLayoutVertical();
             }
-            Spring();
+            LayoutSpring();
             if (n.hasBody) {
-                BeginV("##center");
-                    ImGui::SetNextItemWidth(80);
-                    ImGui::SliderFloat("##v", &n.bodyValue, 0.0f, 1.0f);
-                EndV();
-                Spring();
+                BeginLayoutVertical("##center");
+                    BeginLayoutGroup();
+                        ImGui::SetNextItemWidth(80);
+                        ImGui::SliderFloat("##v", &n.bodyValue, 0.0f, 1.0f);
+                    EndLayoutGroup();
+                EndLayoutVertical();
+                LayoutSpring();
             }
             if (!n.outputs.empty()) {
-                BeginV("##out");
+                BeginLayoutVertical("##out");
                     for (auto& s : n.outputs) DemoEmitSlot(SlotRole_Output, s, false);
-                EndV();
+                EndLayoutVertical();
             }
-        EndH();
+        EndLayoutHorizontal();
     }
     EndNode();
 

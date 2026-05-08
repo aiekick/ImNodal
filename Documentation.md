@@ -50,18 +50,21 @@ if (ImNodal::BeginCanvas("MyCanvas", ImVec2(0, 0))) {
     if (ImNodal::BeginGraph(0xCAFEull)) {
         static ImVec2 pos(100, 100);
         if (ImNodal::BeginNode(1, &pos)) {
-            // Layout assemblé via BeginH/V/Spring (header centré, body avec
-            // inputs gauche / outputs droite, Spring pour pousser à droite).
-            ImNodal::BeginH("##header");
-                ImNodal::Spring();
-                ImGui::TextUnformatted("Hello");
-                ImNodal::Spring();
-            ImNodal::EndH();
-            ImNodal::BeginH("##body");
+            // Layout assemblé via BeginLayoutHorizontal/Vertical + LayoutSpring +
+            // BeginLayoutGroup (header centré, body avec inputs gauche / outputs
+            // droite, LayoutSpring pour pousser à droite).
+            ImNodal::BeginLayoutHorizontal("##header");
+                ImNodal::LayoutSpring();
+                ImNodal::BeginLayoutGroup();
+                    ImGui::TextUnformatted("Hello");
+                ImNodal::EndLayoutGroup();
+                ImNodal::LayoutSpring();
+            ImNodal::EndLayoutHorizontal();
+            ImNodal::BeginLayoutHorizontal("##body");
                 if (ImNodal::BeginInputSlot(2)) { ImGui::Text("in"); ImNodal::EndSlot(); }
-                ImNodal::Spring();
+                ImNodal::LayoutSpring();
                 if (ImNodal::BeginOutputSlot(3)) { ImGui::Text("out"); ImNodal::EndSlot(); }
-            ImNodal::EndH();
+            ImNodal::EndLayoutHorizontal();
             ImNodal::EndNode();
         }
         ImNodal::EndGraph();
@@ -220,75 +223,94 @@ Inside `EndNode`, ImNodal only paints :
 There is **no header tint, no body sectioning, no automatic centering**
 done by ImNodal. The host owns all of that — typically by painting a
 colored band into `GetNodeBackgroundDrawList(id)` over the upper part of
-the node rect and assembling content with `BeginH/V/Spring`.
+the node rect and assembling content with `BeginLayoutHorizontal/Vertical`
++ `LayoutSpring` + `BeginLayoutGroup`.
 
-### Layout primitives — `BeginH/V/Spring`
+### Layout primitives — `BeginLayoutHorizontal/Vertical` + `LayoutSpring` + `BeginLayoutGroup`
 
 The host assembles the node's content with horizontal and vertical
-containers, plus `Spring()` to distribute the remaining space along the
-container's main axis. Usable ONLY inside a `BeginNode/EndNode` scope.
+containers, plus `LayoutSpring()` to distribute the remaining space along
+the container's main axis, plus `BeginLayoutGroup/EndLayoutGroup` to wrap
+bare ImGui widgets so they count as layout children. Usable ONLY inside
+a `BeginNode/EndNode` scope.
 
 ```cpp
-bool BeginH(const char* id, const ImVec2& size = ImVec2(-1.0f, 0.0f));
-void EndH();
-bool BeginV(const char* id, const ImVec2& size = ImVec2(0.0f, -1.0f));
-void EndV();
-void Spring(float weight = 1.0f);
+bool BeginLayoutHorizontal(const char* id, const ImVec2& size = ImVec2(-1.0f, 0.0f));
+void EndLayoutHorizontal();
+bool BeginLayoutVertical(const char* id, const ImVec2& size = ImVec2(0.0f, -1.0f));
+void EndLayoutVertical();
+void LayoutSpring(float weight = 1.0f);
+bool BeginLayoutGroup();
+void EndLayoutGroup();
 ```
 
 `size.x` / `size.y` semantics, per axis :
 - `> 0`  : forced size in pixels.
 - `== 0` : natural size = sum of non-Spring children measured at the
-  previous frame. `Spring()` is a no-op (no gap to fill).
+  previous frame. `LayoutSpring()` is a no-op (no gap to fill).
 - `< 0`  : fill parent (parent container's target along the same axis,
   or the node body width/height when the container is at the top).
 
-`Spring(weight)` claims the gap between the container's target and the
-sum of non-Spring children sizes. Phase 1 supports a single Spring per
-container (multi-Spring with weight distribution is roadmapped).
+`LayoutSpring(weight)` claims the gap between the container's target and
+the sum of non-Spring children sizes. Multi-Spring is supported : each
+`LayoutSpring` takes its proportional share of the gap based on its weight
+(the sum of weights is measured at the previous frame).
+
+**Important** — auto-`SameLine` between siblings is triggered by
+`BeginLayoutHorizontal/Vertical`, `LayoutSpring`, and `BeginLayoutGroup`.
+Bare ImGui widgets (`ImGui::Dummy`, `ImGui::TextUnformatted`,
+`ImGui::Button`, ...) do NOT trigger it. To put a bare widget on the same
+row as its siblings inside `BeginLayoutHorizontal`, wrap it in
+`BeginLayoutGroup/EndLayoutGroup`.
 
 ```cpp
 // Header centered on the node width :
-ImNodal::BeginH("##header");
-    ImNodal::Spring();
-    ImGui::TextUnformatted("Node title");
-    ImNodal::Spring();
-ImNodal::EndH();
+ImNodal::BeginLayoutHorizontal("##header");
+    ImNodal::LayoutSpring();
+    ImNodal::BeginLayoutGroup();
+        ImGui::TextUnformatted("Node title");
+    ImNodal::EndLayoutGroup();
+    ImNodal::LayoutSpring();
+ImNodal::EndLayoutHorizontal();
 
 // Body : inputs left, outputs right, Spring in between :
-ImNodal::BeginH("##body");
+ImNodal::BeginLayoutHorizontal("##body");
     if (BeginInputSlot(in_id))  { ImGui::Text("in");  EndSlot(); }
-    ImNodal::Spring();
+    ImNodal::LayoutSpring();
     if (BeginOutputSlot(out_id)) { ImGui::Text("out"); EndSlot(); }
-ImNodal::EndH();
+ImNodal::EndLayoutHorizontal();
 ```
 
-Children of an horizontal container are auto-`SameLine`d (no manual
-`SameLine` needed between them). Children of a vertical container stack
-naturally.
+Children of an horizontal container are auto-`SameLine`d when each child
+is a Layout primitive (BeginLayout*, LayoutSpring, BeginLayoutGroup) — no
+manual `SameLine` needed between them. Children of a vertical container
+stack naturally.
 
-**1-frame lag** : Spring uses the natural size measured at frame N-1 to
-compute its fill at frame N. First frame falls back to "no gap" — the
-node may be slightly off for one frame after a resize, then converges.
+**1-frame lag** : `LayoutSpring` uses the natural size measured at frame
+N-1 to compute its fill at frame N. First frame falls back to "no gap" —
+the node may be slightly off for one frame after a resize, then converges.
 
 ### Painting your own header tint
 
-The recommended pattern : assemble the header with `BeginH/Spring/Text/Spring/EndH`,
-read `ImGui::GetItemRectMin()` / `Max()` after `EndH`, then in/after
-`EndNode` paint the band into the node background draw list.
+The recommended pattern : assemble the header with
+`BeginLayoutHorizontal/LayoutSpring/BeginLayoutGroup/Text/EndLayoutGroup/LayoutSpring/EndLayoutHorizontal`,
+read `ImGui::GetItemRectMin()` / `Max()` after `EndLayoutHorizontal`, then
+in/after `EndNode` paint the band into the node background draw list.
 
 ```cpp
 BeginNode(id, &pos);
-    BeginH("##header");
-        Spring();
-        ImGui::TextUnformatted(name);
-        Spring();
-    EndH();
+    BeginLayoutHorizontal("##header");
+        LayoutSpring();
+        BeginLayoutGroup();
+            ImGui::TextUnformatted(name);
+        EndLayoutGroup();
+        LayoutSpring();
+    EndLayoutHorizontal();
     const ImVec2 headerMin = ImGui::GetItemRectMin();
     const ImVec2 headerMax = ImGui::GetItemRectMax();
-    BeginH("##body");
+    BeginLayoutHorizontal("##body");
         // ... slots ...
-    EndH();
+    EndLayoutHorizontal();
 EndNode();
 
 // Header band : full-width tint above the body fill.
