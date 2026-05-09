@@ -386,7 +386,7 @@ IMNODAL_API void DrawCanvasGrid();
 //
 // BeginGraph must be called INSIDE a BeginCanvas scope.
 
-using Id = uint64_t;  // ImNodal::Id — user-chosen, must be non-zero
+using Id = uintptr_t;  // ImNodal::Id — user-chosen, must be non-zero
 
 enum SlotRole_ {
     SlotRole_Input  = 0,
