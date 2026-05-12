@@ -1067,6 +1067,19 @@ IMNODAL_API bool DebugCheckVersion(const char* aVersion, size_t aSettingsSize) {
 
 IMNODAL_API bool BeginCanvas(const char* aId, const ImVec2& aSize, const CanvasSettings& arSettings) {
     Context& rCtx = s_getCtx();
+    // Mirror ImGui's "Forgot to call ImGui::NewFrame()" assert. ImNodal
+    // relies on NewFrame() to clear per-frame state (hovered slot /
+    // link ids, conn flags, ctxMenu requests, link hovered / clicked /
+    // doubleClicked, stale drag state). Skipping it leaves stale ids
+    // around and silently breaks gestures (background double-click /
+    // right-click after a link has been hovered, drag-from-slot create
+    // node entirely). Catching the omission here, before any of that
+    // state is consulted, gives a clear stack trace instead of cryptic
+    // UI symptoms.
+    IM_ASSERT(rCtx.lastFrameReset == ImGui::GetFrameCount()
+              && "Forgot to call ImNodal::NewFrame() this frame ? "
+                 "Call it once per frame on the current context, "
+                 "right after ImGui::NewFrame().");
     IM_ASSERT(rCtx.active == false && "BeginCanvas called twice without EndCanvas");
     IM_ASSERT(aId != nullptr && "BeginCanvas: id must be non-null");
 
