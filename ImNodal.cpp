@@ -2055,7 +2055,7 @@ IMNODAL_API void EndNode() {
     if (!noBody) {
         s_setChannel(rCtx, GC_BgBorder);
         const ImU32 borderCol = rNode.selected ? s.Colors[ImNodalCol_NodeBorderSelected] : s.Colors[ImNodalCol_NodeBorder];
-        pDrawList->AddRect(nodeMin, nodeMax, borderCol, rounding, 0, s.NodeBorderThickness);
+        pDrawList->AddRect(nodeMin, nodeMax, borderCol, rounding, s.NodeBorderThickness);
     }
     if ((rNode.settings.flags & ImNodalNodeFlags_HoverHandle) && rNode.hovered) {
         s_setChannel(rCtx, GC_BgBorder);
@@ -2855,12 +2855,7 @@ IMNODAL_API void EndLink() {
         drawColor = rCtx.style.Colors[ImNodalCol_LinkHovered];
     }
     if (rLink.cachedPath.size() >= 2 && rCtx.currentLinkDrawList != nullptr) {
-        rCtx.currentLinkDrawList->AddPolyline(
-            rLink.cachedPath.data(),
-            (int)rLink.cachedPath.size(),
-            drawColor,
-            ImDrawFlags_None,
-            rCtx.currentLinkThickness);
+        rCtx.currentLinkDrawList->AddPolyline(rLink.cachedPath.data(), (int)rLink.cachedPath.size(), drawColor, rCtx.currentLinkThickness, ImDrawFlags_None);
     }
 
     // Restore channel and close the scope.
@@ -3763,14 +3758,12 @@ IMNODAL_API void ShowMiniMap(const MiniMapSettings& arSettings) {
         if (vb.x > mmScreen.Max.x) vb.x = mmScreen.Max.x;
         if (vb.y > mmScreen.Max.y) vb.y = mmScreen.Max.y;
         if (vb.x > va.x && vb.y > va.y) {
-            dl->AddRect(sc(va), sc(vb), vpCol, 0.0f, 0,
-                        arSettings.viewportRectThickness * lineSc);
+            dl->AddRect(sc(va), sc(vb), vpCol, 0.0f, arSettings.viewportRectThickness * lineSc);
         }
     }
 
     // Border
-    dl->AddRect(sc(mmScreen.Min), sc(mmScreen.Max), brCol, 0.0f, 0,
-                arSettings.borderThickness * lineSc);
+    dl->AddRect(sc(mmScreen.Min), sc(mmScreen.Max), brCol, 0.0f, arSettings.borderThickness * lineSc);
 
     s_setChannel(rCtx, GC_Content);
 }
