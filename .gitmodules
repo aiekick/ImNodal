@@ -1,23 +1,12 @@
-[submodule "ImNodal"]
-	path = ImNodal
+[submodule "3rdparty/ezlibs"]
+	path = 3rdparty/ezlibs
+	url = https://github.com/aiekick/ezlibs.git
+[submodule "3rdparty/imguipack"]
+	path = 3rdparty/imguipack
+	url = https://github.com/aiekick/imguipack.git
+[submodule "3rdparty/imnoda"]
+	path = 3rdparty/imnoda
 	url = https://github.com/aiekick/ImNodal.git
-[submodule "3rdparty/glfw"]
-	path = 3rdparty/glfw
-	url = https://github.com/glfw/glfw.git
-	branch = master
-[submodule "3rdparty/tinyxml2"]
-	path = 3rdparty/tinyxml2
-	url = https://github.com/leethomason/tinyxml2.git
-	branch = master
-[submodule "3rdparty/glad"]
-	path = 3rdparty/glad
-	url = https://github.com/Dav1dde/glad.git
-	branch = c
-[submodule "3rdparty/ImGui"]
-	path = 3rdparty/ImGui
-	url = https://github.com/ocornut/imgui.git
-	branch = master
-[submodule "3rdparty/ImGuiFileDialog"]
-	path = 3rdparty/ImGuiFileDialog
-	url = https://github.com/aiekick/imguifiledialog.git
-	branch = master
+[submodule "3rdparty/imnodal"]
+	path = 3rdparty/imnodal
+	url = https://github.com/aiekick/ImNodal.git
