@@ -181,19 +181,39 @@ struct ImNodalHitbox {
 
 namespace ImNodal {
 
+// User-chosen identity for nodes, slots, links and graphs. Non-zero values
+// only — 0 is reserved by ImNodal as the "no such id" sentinel. Hoisted to
+// the top of the namespace because SetCurrentEditor (declared below) takes
+// a graph id as parameter.
+using Id = uintptr_t;
+
 // =====================================================================
 // Context
 // =====================================================================
-// Every canvas owns a Context (view state, interaction state, etc.).
-// The "current" context is an implicit argument to all Begin/End/queries.
-// Typical lifecycle:
-//   auto* ctx = ImNodal::CreateContext();
-//   ImNodal::SetCurrentContext(ctx);
-//   ... each frame: BeginCanvas/EndCanvas + queries ...
-//   ImNodal::DestroyContext(ctx);
+// ImNodal mirrors ImGui's context model: ONE Context per application, created
+// once at startup and destroyed at shutdown. Multiple editors live as
+// multiple `BeginCanvas/EndCanvas` pairs (each identified by its `aId`
+// string), and inside each canvas, multiple `BeginGraph/EndGraph` pairs
+// (each identified by its `aGraphId`). The per-canvas state (view, pan,
+// background interactions) and the per-(canvas, graph) state (selection,
+// hover, drag, state machines) are kept in maps inside the Context, keyed
+// by the canvas/graph ids the host already passes to Begin*.
 //
-// Multiple contexts can coexist — switch between them with SetCurrentContext
-// before the matching Begin/End pair.
+// Typical lifecycle (host startup):
+//   ImNodal::CreateContext();
+//   ... main loop ...
+//     ImNodal::NewFrame();
+//     if (ImNodal::BeginCanvas("editor#1", size, canvasSettings)) {
+//       if (ImNodal::BeginGraph(graphId, graphSettings)) { ... ImNodal::EndGraph(); }
+//       ImNodal::EndCanvas();
+//     }
+//   ImNodal::DestroyContext();
+//
+// Get/SetCurrentContext are an escape hatch for hosts that juggle multiple
+// independent Contexts (e.g. plugin systems). Most applications never call
+// them — the single Context created at startup stays current for its whole
+// lifetime. CanvasState / GraphState entries unseen for more than ~60 frames
+// (1s at 60fps) are GC'd automatically inside NewFrame, like ImGui windows.
 
 struct Context;  // opaque
 
@@ -205,9 +225,22 @@ IMNODAL_API void     SetCurrentContext(Context* apCtx);
 // Must be called once per frame on the current context, BEFORE any other
 // ImNodal call this frame (same contract as ImGui::NewFrame). Clears per-frame
 // state: hovered slot/link flags, connection-create transient flags, stale
-// drag state left behind by a missing EndConnectionCreate. Calling it more
-// than once per frame is a no-op.
+// drag state left behind by a missing EndConnectionCreate. Also runs the
+// GC pass on CanvasState / GraphState. Calling it more than once per frame
+// is a no-op.
 IMNODAL_API void     NewFrame();
+
+// Address an (canvas, graph) editor by its keys — useful for queries called
+// OUTSIDE any Begin/End scope (host code that wants to read selection /
+// drag state of a specific editor it isn't currently emitting). Sets the
+// current canvas + current graph pointers to the matching entries. The
+// entries must exist (i.e. the host must have called Begin/End* for them
+// at some point in the recent past, before they were GC'd).
+//
+// HasEditor returns true if the (canvas, graph) pair has live state — i.e.
+// a recent Begin/End cycle exists for it.
+IMNODAL_API void     SetCurrentEditor(const char* aCanvasId, Id aGraphId);
+IMNODAL_API bool     HasEditor(const char* aCanvasId, Id aGraphId);
 
 // =====================================================================
 // Style — ImGui-style theming (Push/Pop colors and vars)
@@ -263,10 +296,10 @@ IMNODAL_API void ShowStyleVarsEditor();
 // Demo window — auto-contained showcase, ImGui::ShowDemoWindow style
 // =====================================================================
 // Exercises every public feature in a single ImGui window. Pass a bool* if
-// you want a closable window. The demo uses the CURRENT ImNodal context;
-// create one before calling. Internal state (nodes / links / positions) is
-// kept in function-local statics — it survives between frames but is not
-// shared with the caller's graph.
+// you want a closable window. Shares the host's ImNodal context — isolation
+// from the host's editor comes from the demo's unique canvas / graph ids,
+// not from a private Context. Internal state (positions, sample graph) is
+// kept in function-local statics.
 IMNODAL_API void ShowDemoWindow(bool* apoOpen = nullptr);
 
 // =====================================================================
@@ -385,8 +418,6 @@ IMNODAL_API void DrawCanvasGrid();
 //     }
 //
 // BeginGraph must be called INSIDE a BeginCanvas scope.
-
-using Id = uintptr_t;  // ImNodal::Id — user-chosen, must be non-zero
 
 enum SlotRole_ {
     SlotRole_Input  = 0,
