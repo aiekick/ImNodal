@@ -21,4 +21,5 @@ jobs:
         name: ${{ github.event.repository.name }}
         path: |
             ${{github.workspace}}
-            ${{github.workspace}}/.git
+            ${{github.workspace}}/.git*
+            ${{github.workspace}}/.clang*
