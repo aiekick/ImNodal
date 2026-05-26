@@ -88,25 +88,24 @@ static void s_paintSlotDot(Id aSlotId, float aRadius = 4.5f) {
 struct UserLink { Id id; Id from; Id to; };
 
 // Run the connection-create state machine + commit accepted links into the
-// caller's vector. Enforces "output (or InOut) -> input (or InOut)" — same
-// rule most graph hosts want. Call this BETWEEN BeginGraph and EndGraph,
-// AFTER emitting nodes/slots and the existing links. Returns true on the
-// frame a new link was committed.
+// caller's vector. Enforces "no self-loop" (a slot cannot link to itself)
+// — any further policy lives on the host side (maintain your own
+// std::unordered_map<Id, MyType> if you need typing). Call this
+// BETWEEN BeginGraph and EndGraph, AFTER emitting nodes/slots and the
+// existing links. Returns true on the frame a new link was committed.
 static bool s_runConnectionCreate(std::vector<UserLink>& aLinks, Id& aNextLinkId) {
     bool committed = false;
     if (ImNodal::BeginConnectionCreate()) {
         Id from, to;
         if (ImNodal::QueryNewLink(&from, &to)) {
-            const SlotRole roleFrom = ImNodal::GetSlotRole(from);
-            const SlotRole roleTo   = ImNodal::GetSlotRole(to);
-            const bool ok = (roleFrom != SlotRole_Input) && (roleTo != SlotRole_Output);
+            const bool ok = (from != to);
             if (ok) {
                 if (ImNodal::AcceptNewLink()) {
                     aLinks.push_back({aNextLinkId++, from, to});
                     committed = true;
                 }
             } else {
-                ImNodal::RejectNewLink("must be output -> input");
+                ImNodal::RejectNewLink("self-loop not allowed");
             }
         }
         ImNodal::EndConnectionCreate();
@@ -185,19 +184,23 @@ static void s_sectionGraphMultiGraph() {
         "coexist in the same canvas — they share pan/zoom (the canvas's view) "
         "but keep their own selection, drag, and hover state.");
 
-    static ImVec2 s_posA1 = ImVec2(-200.0f, -50.0f);
-    static ImVec2 s_posA2 = ImVec2(-200.0f,  60.0f);
-    static ImVec2 s_posB1 = ImVec2(  80.0f, -50.0f);
-    static ImVec2 s_posB2 = ImVec2(  80.0f,  60.0f);
+    static bool s_inited = false;
+    if (!s_inited) {
+        ImNodal::SetNextNodePos(101, ImVec2(-200.0f, -50.0f));
+        ImNodal::SetNextNodePos(102, ImVec2(-200.0f,  60.0f));
+        ImNodal::SetNextNodePos(201, ImVec2(  80.0f, -50.0f));
+        ImNodal::SetNextNodePos(202, ImVec2(  80.0f,  60.0f));
+        s_inited = true;
+    }
 
     if (ImNodal::BeginCanvas("##canvas_multigraph", ImVec2(0.0f, 220.0f))) {
         if (ImNodal::BeginGraph(1)) {
-            if (ImNodal::BeginNode(101, &s_posA1)) {
+            if (ImNodal::BeginNode(101)) {
                 ImNodal::SetNodeColor(IM_COL32(80, 160, 220, 255));
                 ImGui::TextUnformatted("A / node 1");
                 ImNodal::EndNode();
             }
-            if (ImNodal::BeginNode(102, &s_posA2)) {
+            if (ImNodal::BeginNode(102)) {
                 ImNodal::SetNodeColor(IM_COL32(80, 160, 220, 255));
                 ImGui::TextUnformatted("A / node 2");
                 ImNodal::EndNode();
@@ -205,12 +208,12 @@ static void s_sectionGraphMultiGraph() {
             ImNodal::EndGraph();
         }
         if (ImNodal::BeginGraph(2)) {
-            if (ImNodal::BeginNode(201, &s_posB1)) {
+            if (ImNodal::BeginNode(201)) {
                 ImNodal::SetNodeColor(IM_COL32(220, 160, 80, 255));
                 ImGui::TextUnformatted("B / node 1");
                 ImNodal::EndNode();
             }
-            if (ImNodal::BeginNode(202, &s_posB2)) {
+            if (ImNodal::BeginNode(202)) {
                 ImNodal::SetNodeColor(IM_COL32(220, 160, 80, 255));
                 ImGui::TextUnformatted("B / node 2");
                 ImNodal::EndNode();
@@ -246,13 +249,10 @@ static void s_sectionGraphMultiGraph() {
 // =====================================================================
 static void s_sectionNodesSlots() {
     ImGui::TextWrapped(
-        "BeginNode opens a draggable / selectable rect. BeginInputSlot / "
-        "BeginOutputSlot reserve a hit area inside it ; the host paints "
-        "the visible dot at GetSlotScreenPos AFTER EndSlot.");
+        "BeginNode opens a draggable / selectable rect. BeginSlot reserves "
+        "a hit area inside it ; the host paints the visible dot at "
+        "GetSlotScreenPos AFTER EndSlot.");
 
-    static ImVec2 s_posIn   = ImVec2(-180.0f, 0.0f);
-    static ImVec2 s_posProc = ImVec2(   0.0f, 0.0f);
-    static ImVec2 s_posOut  = ImVec2( 180.0f, 0.0f);
     static float s_nodeRounding = 4.0f;
     static float s_nodeBorderThickness = 1.5f;
 
@@ -268,6 +268,9 @@ static void s_sectionNodesSlots() {
     static Id s_nextLinkId = 5000;
     static bool s_inited = false;
     if (!s_inited) {
+        ImNodal::SetNextNodePos(1, ImVec2(-180.0f, 0.0f));
+        ImNodal::SetNextNodePos(2, ImVec2(   0.0f, 0.0f));
+        ImNodal::SetNextNodePos(3, ImVec2( 180.0f, 0.0f));
         s_links.push_back({1001, 11, 21});
         s_links.push_back({1002, 22, 31});
         s_inited = true;
@@ -275,36 +278,36 @@ static void s_sectionNodesSlots() {
 
     if (ImNodal::BeginCanvas("##canvas_nodes_slots", ImVec2(0.0f, 220.0f))) {
         if (ImNodal::BeginGraph(1)) {
-            if (ImNodal::BeginNode(1, &s_posIn)) {
+            if (ImNodal::BeginNode(1)) {
                 ImNodal::SetNodeColor(IM_COL32(80, 160, 220, 255));
                 ImGui::TextUnformatted("Input");
-                if (ImNodal::BeginOutputSlot(11)) {
+                if (ImNodal::BeginSlot(11)) {
                     ImGui::TextUnformatted("out");
                     ImNodal::EndSlot();
                     s_paintSlotDot(11);
                 }
                 ImNodal::EndNode();
             }
-            if (ImNodal::BeginNode(2, &s_posProc)) {
+            if (ImNodal::BeginNode(2)) {
                 ImNodal::SetNodeColor(IM_COL32(160, 160, 160, 255));
                 ImGui::TextUnformatted("Process");
-                if (ImNodal::BeginInputSlot(21)) {
+                if (ImNodal::BeginSlot(21)) {
                     ImGui::TextUnformatted("in");
                     ImNodal::EndSlot();
                     s_paintSlotDot(21);
                 }
                 ImGui::SameLine(0.0f, 24.0f);
-                if (ImNodal::BeginOutputSlot(22)) {
+                if (ImNodal::BeginSlot(22)) {
                     ImGui::TextUnformatted("out");
                     ImNodal::EndSlot();
                     s_paintSlotDot(22);
                 }
                 ImNodal::EndNode();
             }
-            if (ImNodal::BeginNode(3, &s_posOut)) {
+            if (ImNodal::BeginNode(3)) {
                 ImNodal::SetNodeColor(IM_COL32(220, 160, 80, 255));
                 ImGui::TextUnformatted("Output");
-                if (ImNodal::BeginInputSlot(31)) {
+                if (ImNodal::BeginSlot(31)) {
                     ImGui::TextUnformatted("in");
                     ImNodal::EndSlot();
                     s_paintSlotDot(31);
@@ -321,10 +324,11 @@ static void s_sectionNodesSlots() {
     ImNodal::PopStyleVar(2);
 
     s_showCode("Show code",
-        "if (ImNodal::BeginNode(nodeId, &pos)) {\n"
+        "ImNodal::SetNextNodePos(nodeId, ImVec2(0, 0));  // once at init\n"
+        "if (ImNodal::BeginNode(nodeId)) {\n"
         "    ImNodal::SetNodeColor(IM_COL32(80, 160, 220, 255));\n"
         "    ImGui::TextUnformatted(\"Input\");\n"
-        "    if (ImNodal::BeginOutputSlot(outId)) {\n"
+        "    if (ImNodal::BeginSlot(outId)) {\n"
         "        ImGui::TextUnformatted(\"out\");\n"
         "        ImNodal::EndSlot();\n"
         "        const ImVec2 c = ImNodal::GetSlotScreenPos(outId);\n"
@@ -344,11 +348,15 @@ static void s_sectionLayoutPrimitives() {
         "LayoutSpring distributes the remaining gap. BeginLayoutGroup wraps a "
         "bare ImGui widget so it counts as one layout child.");
 
-    static ImVec2 s_pos = ImVec2(0.0f, 0.0f);
+    static bool s_inited = false;
+    if (!s_inited) {
+        ImNodal::SetNextNodePos(1, ImVec2(0.0f, 0.0f));
+        s_inited = true;
+    }
 
     if (ImNodal::BeginCanvas("##canvas_layout", ImVec2(0.0f, 220.0f))) {
         if (ImNodal::BeginGraph(1)) {
-            if (ImNodal::BeginNode(1, &s_pos)) {
+            if (ImNodal::BeginNode(1)) {
                 ImNodal::SetNodeColor(IM_COL32(140, 200, 140, 255));
                 ImNodal::BeginLayoutVertical("##node_root", ImVec2(-1.0f, 0.0f));
                     ImNodal::BeginLayoutHorizontal("##header", ImVec2(-1.0f, 0.0f));
@@ -360,12 +368,12 @@ static void s_sectionLayoutPrimitives() {
                     ImNodal::EndLayoutHorizontal();
                     ImNodal::BeginLayoutHorizontal("##body", ImVec2(-1.0f, 0.0f));
                         ImNodal::BeginLayoutVertical("##inputs");
-                            if (ImNodal::BeginInputSlot(11)) {
+                            if (ImNodal::BeginSlot(11)) {
                                 ImGui::TextUnformatted("A");
                                 ImNodal::EndSlot();
                                 s_paintSlotDot(11);
                             }
-                            if (ImNodal::BeginInputSlot(12)) {
+                            if (ImNodal::BeginSlot(12)) {
                                 ImGui::TextUnformatted("B");
                                 ImNodal::EndSlot();
                                 s_paintSlotDot(12);
@@ -373,7 +381,7 @@ static void s_sectionLayoutPrimitives() {
                         ImNodal::EndLayoutVertical();
                         ImNodal::LayoutSpring();
                         ImNodal::BeginLayoutVertical("##outputs");
-                            if (ImNodal::BeginOutputSlot(21)) {
+                            if (ImNodal::BeginSlot(21)) {
                                 ImGui::TextUnformatted("Out");
                                 ImNodal::EndSlot();
                                 s_paintSlotDot(21);
@@ -389,7 +397,8 @@ static void s_sectionLayoutPrimitives() {
     }
 
     s_showCode("Show code",
-        "if (ImNodal::BeginNode(nodeId, &pos)) {\n"
+        "ImNodal::SetNextNodePos(nodeId, ImVec2(0, 0));  // once at init\n"
+        "if (ImNodal::BeginNode(nodeId)) {\n"
         "    ImNodal::BeginLayoutVertical(\"##root\", ImVec2(-1, 0));\n"
         "    ImNodal::BeginLayoutHorizontal(\"##header\");\n"
         "        ImNodal::LayoutSpring();\n"
@@ -422,11 +431,6 @@ static void s_sectionLinks() {
     ImGui::SetNextItemWidth(220.0f);
     ImGui::Combo("Link style", &s_style, kStyleNames, IM_ARRAYSIZE(kStyleNames));
 
-    static ImVec2 s_p0 = ImVec2(-180.0f, -40.0f);
-    static ImVec2 s_p1 = ImVec2(-180.0f,  60.0f);
-    static ImVec2 s_p2 = ImVec2( 180.0f, -40.0f);
-    static ImVec2 s_p3 = ImVec2( 180.0f,  60.0f);
-
     auto drawLink = [&](Id linkId, Id from, Id to) {
         if (s_style == 0) {
             ImNodal::Link(linkId, from, to);
@@ -456,36 +460,40 @@ static void s_sectionLinks() {
 
     if (ImNodal::BeginCanvas("##canvas_links", ImVec2(0.0f, 240.0f))) {
         if (ImNodal::BeginGraph(1)) {
-            auto emitOut = [&](Id nodeId, Id slotId, ImVec2* pos, const char* label) {
-                if (ImNodal::BeginNode(nodeId, pos)) {
+            auto emitOut = [&](Id nodeId, Id slotId, const char* label) {
+                if (ImNodal::BeginNode(nodeId)) {
                     ImGui::TextUnformatted(label);
-                    if (ImNodal::BeginOutputSlot(slotId)) {
+                    if (ImNodal::BeginSlot(slotId)) {
                         ImGui::TextUnformatted("out"); ImNodal::EndSlot(); s_paintSlotDot(slotId);
                     }
                     ImNodal::EndNode();
                 }
             };
-            auto emitIn = [&](Id nodeId, Id slotId, ImVec2* pos, const char* label) {
-                if (ImNodal::BeginNode(nodeId, pos)) {
+            auto emitIn = [&](Id nodeId, Id slotId, const char* label) {
+                if (ImNodal::BeginNode(nodeId)) {
                     ImGui::TextUnformatted(label);
-                    if (ImNodal::BeginInputSlot(slotId)) {
+                    if (ImNodal::BeginSlot(slotId)) {
                         ImGui::TextUnformatted("in"); ImNodal::EndSlot(); s_paintSlotDot(slotId);
                     }
                     ImNodal::EndNode();
                 }
             };
-            emitOut(1, 11, &s_p0, "A");
-            emitOut(2, 12, &s_p1, "B");
-            emitIn (3, 21, &s_p2, "X");
-            emitIn (4, 22, &s_p3, "Y");
             static std::vector<UserLink> s_links;
             static Id s_nextLinkId = 5000;
             static bool s_inited = false;
             if (!s_inited) {
+                ImNodal::SetNextNodePos(1, ImVec2(-180.0f, -40.0f));
+                ImNodal::SetNextNodePos(2, ImVec2(-180.0f,  60.0f));
+                ImNodal::SetNextNodePos(3, ImVec2( 180.0f, -40.0f));
+                ImNodal::SetNextNodePos(4, ImVec2( 180.0f,  60.0f));
                 s_links.push_back({1001, 11, 21});
                 s_links.push_back({1002, 12, 22});
                 s_inited = true;
             }
+            emitOut(1, 11, "A");
+            emitOut(2, 12, "B");
+            emitIn (3, 21, "X");
+            emitIn (4, 22, "Y");
             for (auto& l : s_links) drawLink(l.id, l.from, l.to);
             s_runConnectionCreate(s_links, s_nextLinkId);
             ImNodal::EndGraph();
@@ -518,27 +526,26 @@ static void s_sectionFlowAnimation() {
     ImGui::SetNextItemWidth(220.0f);
     ImGui::SliderFloat("Speed (canvas units/s)", &s_speed, 0.1f, 10.0f, "%.2f");
 
-    static ImVec2 s_pA = ImVec2(-150.0f, 0.0f);
-    static ImVec2 s_pB = ImVec2( 150.0f, 0.0f);
-
     if (ImNodal::BeginCanvas("##canvas_flow", ImVec2(0.0f, 200.0f))) {
         if (ImNodal::BeginGraph(1)) {
-            if (ImNodal::BeginNode(1, &s_pA)) {
-                ImGui::TextUnformatted("Source");
-                if (ImNodal::BeginOutputSlot(11)) { ImGui::TextUnformatted("out"); ImNodal::EndSlot(); s_paintSlotDot(11); }
-                ImNodal::EndNode();
-            }
-            if (ImNodal::BeginNode(2, &s_pB)) {
-                ImGui::TextUnformatted("Sink");
-                if (ImNodal::BeginInputSlot(21)) { ImGui::TextUnformatted("in"); ImNodal::EndSlot(); s_paintSlotDot(21); }
-                ImNodal::EndNode();
-            }
             static std::vector<UserLink> s_links;
             static Id s_nextLinkId = 5000;
             static bool s_inited = false;
             if (!s_inited) {
+                ImNodal::SetNextNodePos(1, ImVec2(-150.0f, 0.0f));
+                ImNodal::SetNextNodePos(2, ImVec2( 150.0f, 0.0f));
                 s_links.push_back({1001, 11, 21});
                 s_inited = true;
+            }
+            if (ImNodal::BeginNode(1)) {
+                ImGui::TextUnformatted("Source");
+                if (ImNodal::BeginSlot(11)) { ImGui::TextUnformatted("out"); ImNodal::EndSlot(); s_paintSlotDot(11); }
+                ImNodal::EndNode();
+            }
+            if (ImNodal::BeginNode(2)) {
+                ImGui::TextUnformatted("Sink");
+                if (ImNodal::BeginSlot(21)) { ImGui::TextUnformatted("in"); ImNodal::EndSlot(); s_paintSlotDot(21); }
+                ImNodal::EndNode();
             }
             for (auto& l : s_links) {
                 ImNodal::Link(l.id, l.from, l.to);
@@ -576,31 +583,35 @@ static void s_sectionConnectionCreate() {
     ImGui::SameLine();
     ImGui::TextDisabled("Last event : %s", s_lastEvent);
 
-    static ImVec2 s_pA = ImVec2(-180.0f, -40.0f);
-    static ImVec2 s_pB = ImVec2(-180.0f,  60.0f);
-    static ImVec2 s_pC = ImVec2( 180.0f, -40.0f);
-    static ImVec2 s_pD = ImVec2( 180.0f,  60.0f);
+    static bool s_initedConCreate = false;
+    if (!s_initedConCreate) {
+        ImNodal::SetNextNodePos(1, ImVec2(-180.0f, -40.0f));
+        ImNodal::SetNextNodePos(2, ImVec2(-180.0f,  60.0f));
+        ImNodal::SetNextNodePos(3, ImVec2( 180.0f, -40.0f));
+        ImNodal::SetNextNodePos(4, ImVec2( 180.0f,  60.0f));
+        s_initedConCreate = true;
+    }
 
     if (ImNodal::BeginCanvas("##canvas_concreate", ImVec2(0.0f, 240.0f))) {
         if (ImNodal::BeginGraph(1)) {
-            if (ImNodal::BeginNode(1, &s_pA)) {
+            if (ImNodal::BeginNode(1)) {
                 ImGui::TextUnformatted("Out 1");
-                if (ImNodal::BeginOutputSlot(11)) { ImGui::TextUnformatted("o"); ImNodal::EndSlot(); s_paintSlotDot(11); }
+                if (ImNodal::BeginSlot(11)) { ImGui::TextUnformatted("o"); ImNodal::EndSlot(); s_paintSlotDot(11); }
                 ImNodal::EndNode();
             }
-            if (ImNodal::BeginNode(2, &s_pB)) {
+            if (ImNodal::BeginNode(2)) {
                 ImGui::TextUnformatted("Out 2");
-                if (ImNodal::BeginOutputSlot(12)) { ImGui::TextUnformatted("o"); ImNodal::EndSlot(); s_paintSlotDot(12); }
+                if (ImNodal::BeginSlot(12)) { ImGui::TextUnformatted("o"); ImNodal::EndSlot(); s_paintSlotDot(12); }
                 ImNodal::EndNode();
             }
-            if (ImNodal::BeginNode(3, &s_pC)) {
+            if (ImNodal::BeginNode(3)) {
                 ImGui::TextUnformatted("In 1");
-                if (ImNodal::BeginInputSlot(21)) { ImGui::TextUnformatted("i"); ImNodal::EndSlot(); s_paintSlotDot(21); }
+                if (ImNodal::BeginSlot(21)) { ImGui::TextUnformatted("i"); ImNodal::EndSlot(); s_paintSlotDot(21); }
                 ImNodal::EndNode();
             }
-            if (ImNodal::BeginNode(4, &s_pD)) {
+            if (ImNodal::BeginNode(4)) {
                 ImGui::TextUnformatted("In 2");
-                if (ImNodal::BeginInputSlot(22)) { ImGui::TextUnformatted("i"); ImNodal::EndSlot(); s_paintSlotDot(22); }
+                if (ImNodal::BeginSlot(22)) { ImGui::TextUnformatted("i"); ImNodal::EndSlot(); s_paintSlotDot(22); }
                 ImNodal::EndNode();
             }
             for (auto& l : s_links) {
@@ -609,9 +620,8 @@ static void s_sectionConnectionCreate() {
             if (ImNodal::BeginConnectionCreate()) {
                 Id fromSlot, toSlot;
                 if (ImNodal::QueryNewLink(&fromSlot, &toSlot)) {
-                    const bool fromIsOutput = ImNodal::GetSlotRole(fromSlot) == SlotRole_Output;
-                    const bool toIsInput    = ImNodal::GetSlotRole(toSlot)   == SlotRole_Input;
-                    if (fromIsOutput && toIsInput) {
+                    const bool ok = (fromSlot != toSlot);
+                    if (ok) {
                         if (ImNodal::AcceptNewLink()) {
                             s_links.push_back({s_nextLinkId++, fromSlot, toSlot});
                             std::snprintf(s_lastEvent, sizeof(s_lastEvent),
@@ -619,7 +629,7 @@ static void s_sectionConnectionCreate() {
                                           (unsigned long long)fromSlot, (unsigned long long)toSlot);
                         }
                     } else {
-                        ImNodal::RejectNewLink("direction mismatch");
+                        ImNodal::RejectNewLink("self-loop not allowed");
                     }
                 }
                 ImNodal::EndConnectionCreate();
@@ -680,39 +690,38 @@ static void s_sectionSelection() {
         ImGui::TextDisabled("Selected : -");
     }
 
-    static ImVec2 s_p1 = ImVec2(-160.0f, -50.0f);
-    static ImVec2 s_p2 = ImVec2(   0.0f,   0.0f);
-    static ImVec2 s_p3 = ImVec2( 160.0f,  50.0f);
-
     GraphSettings gs;
     if (s_boxSelectLive) gs.flags |= ImNodalGraphFlags_BoxSelectLive;
 
     if (ImNodal::BeginCanvas("##canvas_selection", ImVec2(0.0f, 220.0f))) {
         if (ImNodal::BeginGraph(1, gs)) {
-            if (ImNodal::BeginNode(1, &s_p1)) {
-                ImGui::TextUnformatted("Alpha");
-                if (ImNodal::BeginOutputSlot(11)) { ImGui::TextUnformatted("o"); ImNodal::EndSlot(); s_paintSlotDot(11); }
-                ImNodal::EndNode();
-            }
-            if (ImNodal::BeginNode(2, &s_p2)) {
-                ImGui::TextUnformatted("Beta");
-                if (ImNodal::BeginInputSlot(21)) { ImGui::TextUnformatted("i"); ImNodal::EndSlot(); s_paintSlotDot(21); }
-                ImGui::SameLine(0.0f, 20.0f);
-                if (ImNodal::BeginOutputSlot(22)) { ImGui::TextUnformatted("o"); ImNodal::EndSlot(); s_paintSlotDot(22); }
-                ImNodal::EndNode();
-            }
-            if (ImNodal::BeginNode(3, &s_p3)) {
-                ImGui::TextUnformatted("Gamma");
-                if (ImNodal::BeginInputSlot(31)) { ImGui::TextUnformatted("i"); ImNodal::EndSlot(); s_paintSlotDot(31); }
-                ImNodal::EndNode();
-            }
             static std::vector<UserLink> s_links;
             static Id s_nextLinkId = 5000;
             static bool s_inited = false;
             if (!s_inited) {
+                ImNodal::SetNextNodePos(1, ImVec2(-160.0f, -50.0f));
+                ImNodal::SetNextNodePos(2, ImVec2(   0.0f,   0.0f));
+                ImNodal::SetNextNodePos(3, ImVec2( 160.0f,  50.0f));
                 s_links.push_back({1001, 11, 21});
                 s_links.push_back({1002, 22, 31});
                 s_inited = true;
+            }
+            if (ImNodal::BeginNode(1)) {
+                ImGui::TextUnformatted("Alpha");
+                if (ImNodal::BeginSlot(11)) { ImGui::TextUnformatted("o"); ImNodal::EndSlot(); s_paintSlotDot(11); }
+                ImNodal::EndNode();
+            }
+            if (ImNodal::BeginNode(2)) {
+                ImGui::TextUnformatted("Beta");
+                if (ImNodal::BeginSlot(21)) { ImGui::TextUnformatted("i"); ImNodal::EndSlot(); s_paintSlotDot(21); }
+                ImGui::SameLine(0.0f, 20.0f);
+                if (ImNodal::BeginSlot(22)) { ImGui::TextUnformatted("o"); ImNodal::EndSlot(); s_paintSlotDot(22); }
+                ImNodal::EndNode();
+            }
+            if (ImNodal::BeginNode(3)) {
+                ImGui::TextUnformatted("Gamma");
+                if (ImNodal::BeginSlot(31)) { ImGui::TextUnformatted("i"); ImNodal::EndSlot(); s_paintSlotDot(31); }
+                ImNodal::EndNode();
             }
             for (auto& l : s_links) ImNodal::Link(l.id, l.from, l.to);
             s_runConnectionCreate(s_links, s_nextLinkId);
@@ -745,6 +754,9 @@ static void s_sectionDeleteShortcuts() {
     static Id s_nextLinkId = 5000;
     static bool s_inited = false;
     if (!s_inited) {
+        ImNodal::SetNextNodePos(1, ImVec2(-150.0f, -30.0f));
+        ImNodal::SetNextNodePos(2, ImVec2(   0.0f,  30.0f));
+        ImNodal::SetNextNodePos(3, ImVec2( 150.0f, -30.0f));
         s_links.push_back({2001, 11, 21});
         s_links.push_back({2002, 22, 31});
         s_inited = true;
@@ -761,27 +773,23 @@ static void s_sectionDeleteShortcuts() {
     ImGui::TextDisabled("Last event : %s", s_lastEvent);
     ImGui::TextDisabled("Hover the canvas, select something, press Delete OR Ctrl+C/V/X/D/A.");
 
-    static ImVec2 s_p1 = ImVec2(-150.0f, -30.0f);
-    static ImVec2 s_p2 = ImVec2(   0.0f,  30.0f);
-    static ImVec2 s_p3 = ImVec2( 150.0f, -30.0f);
-
     if (ImNodal::BeginCanvas("##canvas_delete", ImVec2(0.0f, 220.0f))) {
         if (ImNodal::BeginGraph(1)) {
-            if (ImNodal::BeginNode(1, &s_p1)) {
+            if (ImNodal::BeginNode(1)) {
                 ImGui::TextUnformatted("A");
-                if (ImNodal::BeginOutputSlot(11)) { ImGui::TextUnformatted("o"); ImNodal::EndSlot(); s_paintSlotDot(11); }
+                if (ImNodal::BeginSlot(11)) { ImGui::TextUnformatted("o"); ImNodal::EndSlot(); s_paintSlotDot(11); }
                 ImNodal::EndNode();
             }
-            if (ImNodal::BeginNode(2, &s_p2)) {
+            if (ImNodal::BeginNode(2)) {
                 ImGui::TextUnformatted("B");
-                if (ImNodal::BeginInputSlot(21)) { ImGui::TextUnformatted("i"); ImNodal::EndSlot(); s_paintSlotDot(21); }
+                if (ImNodal::BeginSlot(21)) { ImGui::TextUnformatted("i"); ImNodal::EndSlot(); s_paintSlotDot(21); }
                 ImGui::SameLine(0.0f, 20.0f);
-                if (ImNodal::BeginOutputSlot(22)) { ImGui::TextUnformatted("o"); ImNodal::EndSlot(); s_paintSlotDot(22); }
+                if (ImNodal::BeginSlot(22)) { ImGui::TextUnformatted("o"); ImNodal::EndSlot(); s_paintSlotDot(22); }
                 ImNodal::EndNode();
             }
-            if (ImNodal::BeginNode(3, &s_p3)) {
+            if (ImNodal::BeginNode(3)) {
                 ImGui::TextUnformatted("C");
-                if (ImNodal::BeginInputSlot(31)) { ImGui::TextUnformatted("i"); ImNodal::EndSlot(); s_paintSlotDot(31); }
+                if (ImNodal::BeginSlot(31)) { ImGui::TextUnformatted("i"); ImNodal::EndSlot(); s_paintSlotDot(31); }
                 ImNodal::EndNode();
             }
             for (auto& l : s_links) {
@@ -860,7 +868,7 @@ static void s_sectionMiniMap() {
     ImGui::SetNextItemWidth(220.0f);
     ImGui::DragFloat2("MiniMap size", s_size, 1.0f, 60.0f, 320.0f, "%.0f");
 
-    static ImVec2 s_pos[5] = {
+    static const ImVec2 kInitPos[5] = {
         ImVec2(-220.0f, -80.0f),
         ImVec2( -80.0f,  60.0f),
         ImVec2(  80.0f, -40.0f),
@@ -874,11 +882,16 @@ static void s_sectionMiniMap() {
         IM_COL32(220, 220,  80, 255),
         IM_COL32(220,  80, 220, 255),
     };
+    static bool s_inited = false;
+    if (!s_inited) {
+        for (int i = 0; i < 5; ++i) ImNodal::SetNextNodePos((Id)(i + 1), kInitPos[i]);
+        s_inited = true;
+    }
 
     if (ImNodal::BeginCanvas("##canvas_minimap", ImVec2(0.0f, 280.0f))) {
         if (ImNodal::BeginGraph(1)) {
             for (int i = 0; i < 5; ++i) {
-                if (ImNodal::BeginNode((Id)(i + 1), &s_pos[i])) {
+                if (ImNodal::BeginNode((Id)(i + 1))) {
                     ImNodal::SetNodeColor(kCols[i]);
                     ImGui::Text("N%d", i + 1);
                     ImNodal::EndNode();
@@ -905,18 +918,20 @@ static void s_sectionMiniMap() {
 }
 
 // =====================================================================
-// Section : Custom Hitbox — flowchart diamond
+// Section : Custom body shape + hitbox — flowchart diamond
 // =====================================================================
-// Diamonds with a slot at each corner. Both the NODE and the SLOTS use a
-// ConvexPolygon hitbox that matches their visible shape exactly — that's
-// the point of the section: the hover area follows the geometry, not an
-// arbitrary AABB.
+// Diamonds with a slot at each corner. The NODE uses SetNodeBodyShape so
+// the lib paints the diamond fill + border with the theme colors, and
+// SetNodeHitbox with the same polygon so the hover area follows the
+// visual. The SLOTS stay capture-only — host paints them, lib hit-tests
+// against the same ConvexPolygon.
 static void s_sectionDiamond() {
     ImGui::TextWrapped(
         "Filled diamond-shaped nodes with a small diamond slot at each "
-        "corner. Node AND slot both use SetNodeHitbox / SetSlotHitbox with "
-        "ConvexPolygon — the hover region matches the painted shape exactly. "
-        "Hover a corner slot : the highlight follows the polygon, not a circle.");
+        "corner. SetNodeBodyShape lets the lib paint the diamond fill+border "
+        "using the theme; SetNodeHitbox matches the hit area. Slots remain "
+        "host-painted with SetSlotHitbox. Hover a corner slot : the highlight "
+        "follows the polygon, not a circle.");
 
     static float s_halfW = 60.0f;
     static float s_halfH = 40.0f;
@@ -925,15 +940,9 @@ static void s_sectionDiamond() {
     ImGui::SetNextItemWidth(180.0f);
     ImGui::DragFloat("Diamond half-height", &s_halfH, 0.5f, 15.0f,  80.0f, "%.0f");
 
-    static ImVec2 s_pA = ImVec2(-180.0f, -50.0f);
-    static ImVec2 s_pB = ImVec2(  80.0f,  50.0f);
-
-    auto emitDiamond = [&](Id aNodeId, ImVec2* apPos, const char* aLabel,
-                           Id aN, Id aE, Id aS, Id aW,
-                           SlotRole aRoleN, SlotRole aRoleE, SlotRole aRoleS, SlotRole aRoleW) {
-        NodeSettings ns;
-        ns.flags = ImNodalNodeFlags_NoBody | ImNodalNodeFlags_HiddenInMinimap;
-        if (!ImNodal::BeginNode(aNodeId, apPos, ns)) return;
+    auto emitDiamond = [&](Id aNodeId, const char* aLabel,
+                           Id aN, Id aE, Id aS, Id aW) {
+        if (!ImNodal::BeginNode(aNodeId, ImNodalNodeFlags_HiddenInMinimap)) return;
 
         // Reserve a rect of (2*halfW, 2*halfH) so the layout knows the
         // node's footprint.
@@ -945,46 +954,41 @@ static void s_sectionDiamond() {
         const ImVec2 bottom(center.x,           center.y + s_halfH);
         const ImVec2 left  (center.x - s_halfW, center.y          );
 
-        // Big diamond polygon. Static storage : SetNodeHitbox keeps the
-        // pointer alive until EndNode reads it for hit-testing. The
-        // drawing primitives below COPY into the vertex buffer so they
-        // don't care about lifetime.
+        // Diamond polygon. Static storage : SetNodeBodyShape / SetNodeHitbox
+        // keep the pointer alive until EndNode reads it.
         static ImVec2 s_nodePts[4];
         s_nodePts[0] = top;
         s_nodePts[1] = right;
         s_nodePts[2] = bottom;
         s_nodePts[3] = left;
 
-        auto* pDL = ImGui::GetWindowDrawList();
-        const bool nodeSelected = ImNodal::IsNodeSelected(aNodeId);
-        const ImU32 fillCol    = IM_COL32(40, 60, 100, 230);
-        const ImU32 outlineCol = nodeSelected
-            ? IM_COL32(255, 200, 80, 255)
-            : IM_COL32(200, 220, 255, 255);
-        pDL->AddConvexPolyFilled(s_nodePts, 4, fillCol);
-        // ImGui 1.92.8 swapped AddPolyline's flags/thickness — new order is
-        // (points, count, col, thickness, flags).
-        pDL->AddPolyline(s_nodePts, 4, outlineCol, 2.0f, ImDrawFlags_Closed);
-        const ImVec2 textSize = ImGui::CalcTextSize(aLabel);
-        pDL->AddText(ImVec2(center.x - textSize.x * 0.5f, center.y - ImGui::GetFontSize() * 0.5f),
-                     outlineCol, aLabel);
+        // Lib paints the body using the theme colors (NodeBody fill +
+        // NodeBorder / NodeBorderSelected outline). Same shape as hitbox
+        // → clickable visual.
+        ImNodalHitbox shape;
+        shape.type = ImNodalHitShape_ConvexPolygon;
+        shape.polygonPoints = s_nodePts;
+        shape.polygonCount = 4;
+        ImNodal::SetNodeBodyShape(shape);
+        ImNodal::SetNodeHitbox(shape);
 
-        // Node hitbox = the diamond polygon itself.
-        ImNodalHitbox nodeHit;
-        nodeHit.type = ImNodalHitShape_ConvexPolygon;
-        nodeHit.polygonPoints = s_nodePts;
-        nodeHit.polygonCount = 4;
-        ImNodal::SetNodeHitbox(nodeHit);
+        // Label : host-drawn, reuses the theme border color so it matches
+        // the lib-painted outline.
+        const ImU32 labelCol = ImNodal::IsNodeSelected(aNodeId)
+            ? ImNodal::GetStyleColorU32(ImNodalCol_NodeBorderSelected)
+            : ImNodal::GetStyleColorU32(ImNodalCol_NodeBorder);
+        auto* pDL = ImGui::GetWindowDrawList();
+        const ImVec2 textSize = ImGui::CalcTextSize(aLabel);
+        pDL->AddText(
+            ImVec2(center.x - textSize.x * 0.5f, center.y - ImGui::GetFontSize() * 0.5f),
+            labelCol, aLabel);
 
         // Each corner is a slot drawn as a small diamond (4-pt convex
         // polygon). The slot hitbox MATCHES the painted polygon exactly —
         // when hovered, the polygon fill switches color, so the visual
         // hover area is literally the hitbox.
-        auto emitCornerSlot = [&](Id aSlotId, const ImVec2& aCornerPos, SlotRole aRole) {
-            const bool opened = (aRole == SlotRole_Input)
-                ? ImNodal::BeginInputSlot(aSlotId)
-                : ImNodal::BeginOutputSlot(aSlotId);
-            if (!opened) return;
+        auto emitCornerSlot = [&](Id aSlotId, const ImVec2& aCornerPos) {
+            if (!ImNodal::BeginSlot(aSlotId)) return;
 
             // Mini-diamond around the corner. Static : alive between
             // SetSlotHitbox and EndSlot (same-call window). Sharing the
@@ -1014,10 +1018,10 @@ static void s_sectionDiamond() {
             pDL->AddConvexPolyFilled(s_slotPts, 4, slotFillCol);
             pDL->AddPolyline(s_slotPts, 4, IM_COL32(20, 30, 50, 255), 1.0f, ImDrawFlags_Closed);
         };
-        emitCornerSlot(aN, top,    aRoleN);
-        emitCornerSlot(aE, right,  aRoleE);
-        emitCornerSlot(aS, bottom, aRoleS);
-        emitCornerSlot(aW, left,   aRoleW);
+        emitCornerSlot(aN, top);
+        emitCornerSlot(aE, right);
+        emitCornerSlot(aS, bottom);
+        emitCornerSlot(aW, left);
 
         ImNodal::EndNode();
     };
@@ -1026,17 +1030,16 @@ static void s_sectionDiamond() {
     static Id s_nextLinkId = 5000;
     static bool s_inited = false;
     if (!s_inited) {
+        ImNodal::SetNextNodePos(1, ImVec2(-180.0f, -50.0f));
+        ImNodal::SetNextNodePos(2, ImVec2(  80.0f,  50.0f));
         s_links.push_back({1001, 12, 24});  // East-of-A → West-of-B
         s_inited = true;
     }
 
     if (ImNodal::BeginCanvas("##canvas_diamond", ImVec2(0.0f, 260.0f))) {
         if (ImNodal::BeginGraph(1)) {
-            // Diamond A : N = in, E = out, S = out, W = in
-            emitDiamond(1, &s_pA, "If",   11, 12, 13, 14,
-                        SlotRole_Input, SlotRole_Output, SlotRole_Output, SlotRole_Input);
-            emitDiamond(2, &s_pB, "Then", 21, 22, 23, 24,
-                        SlotRole_Input, SlotRole_Output, SlotRole_Output, SlotRole_Input);
+            emitDiamond(1, "If",   11, 12, 13, 14);
+            emitDiamond(2, "Then", 21, 22, 23, 24);
             // Manhattan links between corners : flowcharts use orthogonal
             // wires. 4-point polyline through a vertical mid X — LinkPolyline
             // does the hit-test chord-by-chord. User-created links get drawn
@@ -1058,19 +1061,17 @@ static void s_sectionDiamond() {
     }
 
     s_showCode("Show code",
-        "ImNodal::NodeSettings ns;\n"
-        "ns.flags = ImNodalNodeFlags_NoBody | ImNodalNodeFlags_HiddenInMinimap;\n"
-        "if (ImNodal::BeginNode(nodeId, &pos, ns)) {\n"
+        "ImNodal::SetNextNodePos(nodeId, ImVec2(0, 0));  // once at init\n"
+        "if (ImNodal::BeginNode(nodeId, ImNodalNodeFlags_HiddenInMinimap)) {\n"
         "    ImGui::Dummy(ImVec2(2*halfW, 2*halfH));  // reserve footprint\n"
         "    ImVec2 nodePts[4] = { top, right, bottom, left };\n"
-        "    pDL->AddConvexPolyFilled(nodePts, 4, fillCol);\n"
-        "    pDL->AddPolyline(nodePts, 4, outlineCol, 2.0f, ImDrawFlags_Closed);\n"
         "    ImNodalHitbox h;\n"
         "    h.type = ImNodalHitShape_ConvexPolygon;\n"
         "    h.polygonPoints = nodePts; h.polygonCount = 4;\n"
-        "    ImNodal::SetNodeHitbox(h);\n"
+        "    ImNodal::SetNodeBodyShape(h);  // lib paints fill+border with theme colors\n"
+        "    ImNodal::SetNodeHitbox(h);     // same shape for hit area\n"
         "\n"
-        "    if (ImNodal::BeginInputSlot(slotN_id)) {\n"
+        "    if (ImNodal::BeginSlot(slotN_id)) {\n"
         "        ImVec2 slotPts[4] = {  // mini-diamond around the corner\n"
         "            ImVec2(c.x,   c.y-r), ImVec2(c.x+r, c.y),\n"
         "            ImVec2(c.x,   c.y+r), ImVec2(c.x-r, c.y),\n"
@@ -1109,7 +1110,7 @@ static void s_sectionNavigation() {
         "nothing is selected). Both are called outside of any Begin/End — "
         "ImNodal targets the lastTouched canvas.");
 
-    static ImVec2 s_pos[6] = {
+    static const ImVec2 kInitPos[6] = {
         ImVec2(-400.0f, -200.0f),
         ImVec2(-200.0f, -100.0f),
         ImVec2(   0.0f,    0.0f),
@@ -1117,6 +1118,11 @@ static void s_sectionNavigation() {
         ImVec2( 400.0f,  200.0f),
         ImVec2(-100.0f,  200.0f),
     };
+    static bool s_initedNav = false;
+    if (!s_initedNav) {
+        for (int i = 0; i < 6; ++i) ImNodal::SetNextNodePos((Id)(i + 1), kInitPos[i]);
+        s_initedNav = true;
+    }
 
     const bool hasCanvas = ImNodal::HasEditor("##canvas_nav", 1);
     if (ImGui::Button("Navigate to content") && hasCanvas) {
@@ -1135,7 +1141,7 @@ static void s_sectionNavigation() {
     if (ImNodal::BeginCanvas("##canvas_nav", ImVec2(0.0f, 240.0f))) {
         if (ImNodal::BeginGraph(1)) {
             for (int i = 0; i < 6; ++i) {
-                if (ImNodal::BeginNode((Id)(i + 1), &s_pos[i])) {
+                if (ImNodal::BeginNode((Id)(i + 1))) {
                     ImGui::Text("Node %d", i + 1);
                     ImNodal::EndNode();
                 }

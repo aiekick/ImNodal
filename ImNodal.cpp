@@ -44,11 +44,9 @@ namespace ImNodal {
 struct SlotState {
     Id parentNode{0};  // 0 = standalone
     Id graphId{0};     // 0 = standalone (outside any BeginGraph)
-    SlotRole role{SlotRole_Input};
-    uint32_t typeTag{0};
-    ImNodalSlotFlags flags{ImNodalSlotFlags_None};  // snapshot of SlotSettings::flags
+    ImNodalSlotFlags flags{ImNodalSlotFlags_None};  // snapshot of BeginSlot flags
     // Pivot point at which links anchor on this slot. Computed at EndSlot
-    // from the group rect + role (or pivot override). Hosts that draw their
+    // from the group rect (or pivot override). Hosts that draw their
     // own dot should draw it at this position so the visible dot matches
     // the link endpoint.
     ImVec2 screenPos{};
@@ -77,14 +75,21 @@ struct NodeState {
     bool selected{false};
     bool dragging{false};
     bool ctxMenuRequested{false};  // right-click on node, set by EndNode
-    // Settings snapshot for EndNode draw
-    NodeSettings settings;
+    // Flags snapshot from BeginNode, consumed by EndNode draw + interactions.
+    ImNodalNodeFlags flags{ImNodalNodeFlags_None};
     // Last frame's screen-space rect (for GetNodeRect / per-node drawlists)
     ImRect lastScreenRect{};
     // Custom node hitbox set by SetNodeHitbox between Begin/EndNode. type==None
     // means "use the rectangular nodeMin/nodeMax for hover/click tests" (the
     // legacy behavior). Otherwise the shape drives hit-tests.
     ImNodalHitbox customHitbox{};
+    // Custom node body shape set by SetNodeBodyShape between Begin/EndNode.
+    // type==None (or Rect) → default rounded rect fill+border. Circle or
+    // ConvexPolygon → ImNodal paints the body in that shape using the theme
+    // colors (NodeBody for fill, NodeBorder / NodeBorderSelected for outline).
+    // Hitbox and body shape are independent — the host may set one without
+    // the other, or pass the same shape to both for a clickable polygon.
+    ImNodalHitbox bodyShape{};
     // Max natural width/height of all TOP-LEVEL BeginLayoutHorizontal/Vertical containers emitted
     // inside this node. Used by "fill parent" mode of subsequent toplevel
     // containers to size against their siblings rather than against
@@ -94,8 +99,6 @@ struct NodeState {
     float currentMaxToplevelNatHeight{0.0f};
     float lastFrameMaxToplevelNatWidth{0.0f};
     float lastFrameMaxToplevelNatHeight{0.0f};
-    // Pointer to user's master copy of pos — updated on drag at EndNode
-    ImVec2* userPosPtr{nullptr};
     // Custom color set by ImNodal::SetNodeColor between BeginNode/EndNode
     // (host's accent / header color). 0 = no custom color. Reset every frame
     // at BeginNode. Read by the minimap and any future feature that wants
@@ -403,6 +406,9 @@ struct CanvasState {
     // reset to "no override" so the next slot/node starts fresh.
     ImNodalHitbox stagingSlotHitbox{};
     ImNodalHitbox stagingNodeHitbox{};
+    // Staging body shape filled by SetNodeBodyShape between BeginNode/
+    // EndNode. Same lifecycle as stagingNodeHitbox.
+    ImNodalHitbox stagingNodeBodyShape{};
 
     // Global "selected link" for standalone (outside-of-graph) link queries.
     // Lives at canvas level (not graph) since a standalone link has no graph.
@@ -1878,7 +1884,7 @@ static void s_commitBoxSelect(Context& arCtx, GraphState& arGraph, const ImVec2&
             if (kv.second.graphId != arGraph.id)
                 continue;
             // NotSelectable nodes never enter the box selection.
-            if (kv.second.settings.flags & ImNodalNodeFlags_NotSelectable)
+            if (kv.second.flags & ImNodalNodeFlags_NotSelectable)
                 continue;
             const ImRect& r = kv.second.lastScreenRect;
             if (r.Min.x >= r.Max.x)
@@ -2119,24 +2125,23 @@ IMNODAL_API Id GetCurrentGraphId() {
 // -----------------------------
 // Node
 // -----------------------------
-IMNODAL_API bool BeginNode(Id aNodeId, ImVec2* apPos, const NodeSettings& arSettings) {
+IMNODAL_API bool BeginNode(Id aNodeId, ImNodalNodeFlags aFlags) {
     Context& rCtx = s_getCtx();
     IM_ASSERT((rCtx.pGraph != nullptr) && "BeginNode must be called inside BeginGraph/EndGraph");
     IM_ASSERT(aNodeId != 0 && "Node id must be non-zero");
 
     NodeState& rNode = rCtx.nodes[aNodeId];
     rNode.graphId = rCtx.Graph().id;
-    rNode.settings = arSettings;
+    rNode.flags = aFlags;
     rNode.customHitbox = ImNodalHitbox{};  // SetNodeHitbox between Begin/End writes here
+    rNode.bodyShape = ImNodalHitbox{};     // SetNodeBodyShape between Begin/End writes here
     rNode.currentMaxToplevelNatWidth = 0.0f;
     rNode.currentMaxToplevelNatHeight = 0.0f;
-    rNode.userPosPtr = apPos;
     rNode.color = 0;  // SetNodeColor between Begin/End writes here, reset each frame
 
-    // Sync position from user's storage
-    if (apPos != nullptr) {
-        rNode.pos = *apPos;
-    }
+    // Position is stored on rNode.pos (canvas space). Host pushes initial
+    // pos via SetNodePos ; drag updates rNode.pos directly ; GetNodePos
+    // reads it back.
 
     rCtx.Graph().currentNodeId = aNodeId;
     rCtx.Graph().frameNodeOrder.push_back(aNodeId);
@@ -2189,6 +2194,13 @@ IMNODAL_API void EndNode() {
     }
     rCtx.Canvas().stagingNodeHitbox = ImNodalHitbox{};
 
+    // SetNodeBodyShape between Begin/EndNode? Promote the staging body shape
+    // to the node's persistent state, then clear staging.
+    if (rCtx.Canvas().stagingNodeBodyShape.type != ImNodalHitShape_None) {
+        rNode.bodyShape = rCtx.Canvas().stagingNodeBodyShape;
+    }
+    rCtx.Canvas().stagingNodeBodyShape = ImNodalHitbox{};
+
     // Hover test : the rectangular fallback covers the legacy "node = AABB"
     // behavior. A custom hitbox (SetNodeHitbox) overrides the shape — used
     // for circular reroute dots, diamond decision nodes, ...
@@ -2212,8 +2224,8 @@ IMNODAL_API void EndNode() {
     // "topmost" = mouse on node AND no user widget is above the cursor.
     const bool hoveredTopMost = rNode.hovered && !ImGui::IsAnyItemHovered();
 
-    const bool notSelectable = (rNode.settings.flags & ImNodalNodeFlags_NotSelectable) != 0;
-    const bool notMovable = (rNode.settings.flags & ImNodalNodeFlags_NotMovable) != 0;
+    const bool notSelectable = (rNode.flags & ImNodalNodeFlags_NotSelectable) != 0;
+    const bool notMovable = (rNode.flags & ImNodalNodeFlags_NotMovable) != 0;
     if (hoveredTopMost && lmbClicked && !notSelectable) {
         const bool toggle = s_multiSelectHeld(rGraph);
         s_selectNode(rGraph, rCtx.Graph().currentNodeId, toggle);
@@ -2247,29 +2259,47 @@ IMNODAL_API void EndNode() {
         rCtx.Graph().ctxMenuNodeId = rCtx.Graph().currentNodeId;
     }
 
-    // Write drag result back to the user's master copy
-    if (rNode.userPosPtr != nullptr) {
-        *rNode.userPosPtr = rNode.pos;
-    }
-
     auto* const pDrawList = rCtx.Canvas().drawList;
     const Style& s = rCtx.style;
     const float rounding = s.NodeRounding;
-    const bool noBody = (rNode.settings.flags & ImNodalNodeFlags_NoBody) != 0;
-    // Body fill on BgFill (deepest node channel). The host can layer its own
-    // tint (header band, etc.) on UserBg ABOVE this and BELOW the border.
+    const bool noBody = (rNode.flags & ImNodalNodeFlags_NoBody) != 0;
+    // Body fill on BgFill (deepest node channel) + border on BgBorder. The
+    // host can layer its own tint (header band, etc.) on UserBg ABOVE the
+    // fill and BELOW the border. When SetNodeBodyShape was called, the
+    // fill/border follow the shape (circle / convex polygon) instead of the
+    // default rect ; NodeRounding is ignored in that case.
     if (!noBody) {
-        s_setChannel(rCtx, GC_BgFill);
-        pDrawList->AddRectFilled(nodeMin, nodeMax, s.Colors[ImNodalCol_NodeBody], rounding);
-    }
-    // Border + hover handle on BgBorder (above UserBg) so they stay visible
-    // on top of any host-drawn header/footer band.
-    if (!noBody) {
-        s_setChannel(rCtx, GC_BgBorder);
+        const ImU32 fillCol = s.Colors[ImNodalCol_NodeBody];
         const ImU32 borderCol = rNode.selected ? s.Colors[ImNodalCol_NodeBorderSelected] : s.Colors[ImNodalCol_NodeBorder];
-        pDrawList->AddRect(nodeMin, nodeMax, borderCol, rounding, s.NodeBorderThickness);
+        const float borderThk = s.NodeBorderThickness;
+        switch (rNode.bodyShape.type) {
+            case ImNodalHitShape_Circle: {
+                s_setChannel(rCtx, GC_BgFill);
+                pDrawList->AddCircleFilled(rNode.bodyShape.center, rNode.bodyShape.radius, fillCol);
+                s_setChannel(rCtx, GC_BgBorder);
+                pDrawList->AddCircle(rNode.bodyShape.center, rNode.bodyShape.radius, borderCol, 0, borderThk);
+                break;
+            }
+            case ImNodalHitShape_ConvexPolygon: {
+                s_setChannel(rCtx, GC_BgFill);
+                pDrawList->AddConvexPolyFilled(rNode.bodyShape.polygonPoints, rNode.bodyShape.polygonCount, fillCol);
+                s_setChannel(rCtx, GC_BgBorder);
+                pDrawList->AddPolyline(rNode.bodyShape.polygonPoints, rNode.bodyShape.polygonCount,
+                                       borderCol, borderThk, ImDrawFlags_Closed);
+                break;
+            }
+            case ImNodalHitShape_Rect:
+            case ImNodalHitShape_None:
+            default: {
+                s_setChannel(rCtx, GC_BgFill);
+                pDrawList->AddRectFilled(nodeMin, nodeMax, fillCol, rounding);
+                s_setChannel(rCtx, GC_BgBorder);
+                pDrawList->AddRect(nodeMin, nodeMax, borderCol, rounding, borderThk);
+                break;
+            }
+        }
     }
-    if ((rNode.settings.flags & ImNodalNodeFlags_HoverHandle) && rNode.hovered) {
+    if ((rNode.flags & ImNodalNodeFlags_HoverHandle) && rNode.hovered) {
         s_setChannel(rCtx, GC_BgBorder);
         const float h = s.NodeHoverHandleHeight;
         const ImVec2 bMin(nodeMin.x + 2.0f, nodeMin.y + 1.0f);
@@ -2295,6 +2325,27 @@ IMNODAL_API void SetNodeColor(ImU32 aColor) {
     if (it == rCtx.nodes.end())
         return;
     it->second.color = aColor;
+}
+
+IMNODAL_API void SetNodePos(ImVec2 aPos) {
+    Context& rCtx = s_getCtx();
+    IM_ASSERT(rCtx.Graph().currentNodeId != 0 && "SetNodePos must be called between BeginNode/EndNode (use SetNextNodePos with an id outside the scope)");
+    auto it = rCtx.nodes.find(rCtx.Graph().currentNodeId);
+    if (it == rCtx.nodes.end())
+        return;
+    it->second.pos = aPos;
+}
+
+IMNODAL_API void SetNextNodePos(Id aNodeId, ImVec2 aPos) {
+    Context& rCtx = s_getCtx();
+    IM_ASSERT(aNodeId != 0 && "Node id must be non-zero");
+    rCtx.nodes[aNodeId].pos = aPos;
+}
+
+IMNODAL_API ImVec2 GetNodePos(Id aNodeId) {
+    Context& rCtx = s_getCtx();
+    auto it = rCtx.nodes.find(aNodeId);
+    return (it != rCtx.nodes.end()) ? it->second.pos : ImVec2(0.0f, 0.0f);
 }
 
 // =====================================================================
@@ -2484,16 +2535,14 @@ IMNODAL_API void LayoutSpring(float aWeight) {
 // -----------------------------
 // Slot primitive
 // -----------------------------
-IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const SlotSettings& arSettings) {
+IMNODAL_API bool BeginSlot(Id aSlotId, ImNodalSlotFlags aFlags) {
     Context& rCtx = s_getCtx();
     IM_ASSERT(aSlotId != 0 && "Slot id must be non-zero");
     IM_ASSERT(rCtx.Graph().currentSlotId == 0 && "Nested BeginSlot is not supported");
     SlotState& rSlot = rCtx.slots[aSlotId];
     rSlot.parentNode = rCtx.Graph().currentNodeId;
     rSlot.graphId = rCtx.Graph().id;
-    rSlot.role = aRole;
-    rSlot.typeTag = arSettings.typeTag;
-    rSlot.flags = arSettings.flags;
+    rSlot.flags = aFlags;
     // SetSlotHitbox between Begin/End writes here. Reset before the early
     // hover test so a missing call falls back to the last-frame rect.
     rSlot.customHitbox = ImNodalHitbox{};
@@ -2535,8 +2584,6 @@ IMNODAL_API void EndSlot() {
 
     SlotState& rSlot = rCtx.slots[rCtx.Graph().currentSlotId];
 
-    const bool isInOut = (rSlot.role == SlotRole_InOut);
-
     // Empty-slot fallback : if the host emitted nothing between BeginSlot
     // and EndSlot, the cursor is still at the BeginGroup position. Insert a
     // Dummy of `Style.SlotMinSize` so the slot has a hit area the host can
@@ -2564,16 +2611,13 @@ IMNODAL_API void EndSlot() {
     const ImVec2 pivotMin = gMin + gSize * rCtx.Canvas().slotAlignment;
     const ImVec2 pivotMax = pivotMin + rCtx.Canvas().slotSize;
     rSlot.screenPos = (pivotMin + pivotMax) * 0.5f + rCtx.Canvas().slotPivotOffset;
-    // Tangent derived from slotAlignment instead of role :
+    // Tangent derived from slotAlignment :
     //   alignment.x near 0   -> tangent (-1, 0)   (left edge -> link goes left)
     //   alignment.x near 1   -> tangent ( 1, 0)   (right edge -> link goes right)
     //   alignment.y near 0   -> tangent ( 0, -1)  (top edge -> link goes up)
     //   alignment.y near 1   -> tangent ( 0,  1)  (bottom edge -> link goes down)
     //   centered             -> tangent ( 0,  0)  (resolved dynamically by Link)
-    // SlotRole_InOut also forces (0, 0) for backward-compat with reroute.
-    if (isInOut) {
-        rSlot.tangent = ImVec2(0.0f, 0.0f);
-    } else {
+    {
         const float ax = rCtx.Canvas().slotAlignment.x;
         const float ay = rCtx.Canvas().slotAlignment.y;
         const float dx = ax - 0.5f;  // negative -> left, positive -> right
@@ -2666,13 +2710,6 @@ IMNODAL_API void EndSlot() {
 
     ImGui::PopID();
     rCtx.Graph().currentSlotId = 0;
-}
-
-IMNODAL_API bool BeginInputSlot(Id aSlotId, const SlotSettings& arSettings) {
-    return BeginSlot(aSlotId, SlotRole_Input, arSettings);
-}
-IMNODAL_API bool BeginOutputSlot(Id aSlotId, const SlotSettings& arSettings) {
-    return BeginSlot(aSlotId, SlotRole_Output, arSettings);
 }
 
 // -----------------------------
@@ -2793,11 +2830,6 @@ IMNODAL_API void SetSelectedLink(Id aLinkId) {
     } else {
         rCtx.Canvas().standaloneSelectedLink = aLinkId;
     }
-}
-IMNODAL_API SlotRole GetSlotRole(Id aSlotId) {
-    Context& rCtx = s_getCtx();
-    auto it = rCtx.slots.find(aSlotId);
-    return (it != rCtx.slots.end()) ? it->second.role : SlotRole_Input;
 }
 
 // =====================================================================
@@ -3951,7 +3983,7 @@ IMNODAL_API void ShowMiniMap(const MiniMapSettings& arSettings) {
         if (it == rCtx.nodes.end())
             continue;
         const NodeState& n = it->second;
-        if (n.settings.flags & ImNodalNodeFlags_HiddenInMinimap)
+        if (n.flags & ImNodalNodeFlags_HiddenInMinimap)
             continue;
         const ImRect& nr_canvas = n.lastScreenRect;
         if (nr_canvas.GetWidth() <= 0.0f)
@@ -4068,6 +4100,16 @@ IMNODAL_API void SetNodeHitbox(const ImNodalHitbox& aHitbox) {
                   "ImNodal hitbox polygon must be convex (and have >= 3 distinct points)");
     }
     rCtx.Canvas().stagingNodeHitbox = aHitbox;
+}
+
+IMNODAL_API void SetNodeBodyShape(const ImNodalHitbox& aShape) {
+    Context& rCtx = s_getCtx();
+    IM_ASSERT(rCtx.Graph().currentNodeId != 0 && "SetNodeBodyShape must be called between BeginNode/EndNode");
+    if (aShape.type == ImNodalHitShape_ConvexPolygon) {
+        IM_ASSERT(s_isConvexPolygon(aShape.polygonPoints, aShape.polygonCount) &&
+                  "ImNodal body shape polygon must be convex (and have >= 3 distinct points)");
+    }
+    rCtx.Canvas().stagingNodeBodyShape = aShape;
 }
 
 // =====================================================================

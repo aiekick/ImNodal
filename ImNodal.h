@@ -69,7 +69,7 @@ enum ImNodalCol_ {
     ImNodalCol_FlowDot,            // moving dot color along FlowLink
     ImNodalCol_MiniMapBg,          // minimap background fill
     ImNodalCol_MiniMapBorder,      // minimap outer frame
-    ImNodalCol_MiniMapNode,        // default fill for a node rect inside the minimap (used when NodeSettings::miniMapColor==0)
+    ImNodalCol_MiniMapNode,        // default fill for a node rect inside the minimap (used when SetNodeColor was not called for the node)
     ImNodalCol_MiniMapViewport,    // rect outlining the visible canvas inside the minimap
     ImNodalCol_COUNT,
 };
@@ -248,9 +248,10 @@ IMNODAL_API bool     HasEditor(const char* aCanvasId, Id aGraphId);
 // All visual aspects (colors + numeric appearance vars) live in Style.
 // Read via GetStyleColorU32 / GetStyleVarFloat / GetStyleVarVec2, override
 // temporarily via PushStyleColor / PushStyleVar (matching the ImGui pattern).
-// Settings structs (CanvasSettings / NodeSettings / SlotSettings /
-// GraphSettings) only carry BEHAVIOR (mouse buttons, keys, modes) — never
-// appearance.
+// Settings structs (CanvasSettings / GraphSettings) only carry BEHAVIOR
+// (mouse buttons, keys, modes) — never appearance. Single-flag-only
+// configs (BeginNode / BeginSlot) take the matching flags argument
+// directly, ImGui-style.
 
 struct Style {
     ImU32  Colors[ImNodalCol_COUNT];
@@ -399,16 +400,16 @@ IMNODAL_API void DrawCanvasGrid();
 //
 //     if (BeginCanvas("c", size, canvasSettings)) {
 //         if (BeginGraph(graphId, graphSettings)) {
-//             if (BeginNode(nodeId, &pos, nodeSettings)) {
+//             if (BeginNode(nodeId, nodeFlags)) {
 //                 BeginLayoutHorizontal("##header");
 //                     LayoutSpring();
 //                     BeginLayoutGroup(); ImGui::TextUnformatted("Title"); EndLayoutGroup();
 //                     LayoutSpring();
 //                 EndLayoutHorizontal();
 //                 BeginLayoutHorizontal("##body");
-//                     if (BeginInputSlot(in_id))  { ImGui::Text("A");   EndSlot(); }
+//                     if (BeginSlot(in_id))  { ImGui::Text("A");   EndSlot(); }
 //                     LayoutSpring();
-//                     if (BeginOutputSlot(out_id)) { ImGui::Text("Out"); EndSlot(); }
+//                     if (BeginSlot(out_id)) { ImGui::Text("Out"); EndSlot(); }
 //                 EndLayoutHorizontal();
 //                 EndNode();
 //             }
@@ -418,13 +419,6 @@ IMNODAL_API void DrawCanvasGrid();
 //     }
 //
 // BeginGraph must be called INSIDE a BeginCanvas scope.
-
-enum SlotRole_ {
-    SlotRole_Input  = 0,
-    SlotRole_Output = 1,
-    SlotRole_InOut  = 2,  // bidirectional (reroute / bridge slots) — accepts links either way
-};
-typedef int SlotRole;
 
 // -----------------------------
 // Graph
@@ -448,7 +442,7 @@ IMNODAL_API Id   GetCurrentGraphId();
 // Node
 // -----------------------------
 // BeginNode/EndNode opens a draggable, selectable, hit-testable rect at
-// the canvas position pointed to by `apPos`. ImNodal paints the body fill
+// the node's stored canvas position. ImNodal paints the body fill
 // (ImNodalCol_NodeBody) and the border (NodeBorder / NodeBorderSelected)
 // inside EndNode — nothing else. Use the layout primitives BeginLayoutHorizontal /
 // BeginLayoutVertical / LayoutSpring / BeginLayoutGroup to assemble the content. Headers, footers, columns, and any tinted band
@@ -460,14 +454,31 @@ IMNODAL_API Id   GetCurrentGraphId();
 // want a "reroute-like" node combine `ImNodalNodeFlags_NoBody |
 // ImNodalNodeFlags_HiddenInMinimap` and call SetNodeHitbox() to override
 // the rectangular hit area with a circle.
-struct NodeSettings {
-    ImNodalNodeFlags flags{ImNodalNodeFlags_None};
-    NodeSettings() = default;
-};
-
-// aPos is IN/OUT in canvas space. When non-null and movable, dragging updates it.
-IMNODAL_API bool BeginNode(Id aNodeId, ImVec2* apPos, const NodeSettings& arSettings = {});
+//
+// Position is OWNED by the lib (canvas space). Use SetNodePos to push an
+// initial / restored position, and GetNodePos to read it back (for save).
+// Dragging updates the stored position automatically — DO NOT call
+// SetNodePos every frame, that would defeat dragging.
+IMNODAL_API bool BeginNode(Id aNodeId, ImNodalNodeFlags aFlags = ImNodalNodeFlags_None);
 IMNODAL_API void EndNode();
+
+// Push / pull the node's canvas-space position — ImGui-style.
+//
+// SetNodePos: applies to the CURRENT node (must be called between
+// BeginNode and EndNode — no id needed).
+//
+// SetNextNodePos: addresses a node BY id, callable from anywhere (init
+// code, load-from-disk, frame setup BEFORE BeginNode). Allocates the
+// entry if the id has never been seen.
+//
+// GetNodePos: lookup by id, anywhere.
+//
+// Do NOT call either setter every frame — that would clobber the
+// drag-updated stored position. Push the initial value ONCE (e.g. behind
+// a `static bool s_inited` flag), then let the lib own the position.
+IMNODAL_API void   SetNodePos(ImVec2 aPos);
+IMNODAL_API void   SetNextNodePos(Id aNodeId, ImVec2 aPos);
+IMNODAL_API ImVec2 GetNodePos(Id aNodeId);
 
 // Set a "color" on the node currently open between BeginNode and EndNode.
 // Typical use : the host's accent / header color so the node is recognizable
@@ -573,7 +584,7 @@ IMNODAL_API void EndLayoutGroup();
 // To draw the visible dot (or any other slot mark), call GetSlotScreenPos
 // AFTER EndSlot and paint at that point yourself :
 //
-//     if (ImNodal::BeginInputSlot(slotId)) {
+//     if (ImNodal::BeginSlot(slotId)) {
 //         ImGui::Dummy(ImVec2(12, 12));               // reserve room for the mark
 //         ImGui::SameLine(0, 4);
 //         ImGui::TextUnformatted("label");
@@ -601,17 +612,8 @@ IMNODAL_API void EndLayoutGroup();
 // ImNodal substitutes a Dummy of `Style.SlotMinSize` so the slot still has
 // a hit area. The host can then draw its own mark at GetSlotScreenPos —
 // the "minimal button" pattern.
-struct SlotSettings {
-    uint32_t typeTag{0};                              // user-chosen type tag (for M2 connection rules)
-    ImNodalSlotFlags flags{ImNodalSlotFlags_None};    // see ImNodalSlotFlags_
-    SlotSettings() = default;
-};
-
-IMNODAL_API bool BeginSlot(Id aSlotId, SlotRole aRole, const SlotSettings& arSettings = {});
+IMNODAL_API bool BeginSlot(Id aSlotId, ImNodalSlotFlags aFlags = ImNodalSlotFlags_None);
 IMNODAL_API void EndSlot();
-// Convenience wrappers
-IMNODAL_API bool BeginInputSlot (Id aSlotId, const SlotSettings& arSettings = {});
-IMNODAL_API bool BeginOutputSlot(Id aSlotId, const SlotSettings& arSettings = {});
 
 // -----------------------------
 // Graph queries & interactions
@@ -688,7 +690,6 @@ IMNODAL_API bool   IsLinkDoubleClicked(Id aLinkId);
 IMNODAL_API bool   IsLinkSelected(Id aLinkId);
 IMNODAL_API Id     GetSelectedLink();
 IMNODAL_API void   SetSelectedLink(Id aLinkId);            // pass 0 to clear
-IMNODAL_API SlotRole GetSlotRole(Id aSlotId);              // useful for rule checks during link creation
 
 // =====================================================================
 // Connection creation (M2 — thedmd-style state machine)
@@ -826,7 +827,7 @@ IMNODAL_API void FlowLink(Id aLinkId, float aSpeed = 2.0f, ImU32 aColor = 0);
 // MiniMap (overview window anchored to a corner of the canvas)
 // =====================================================================
 // Draws a scaled-down view of the current graph: each node as a rectangle
-// (using NodeSettings::miniMapColor or NodeBody color as fallback) plus a
+// (using the color set via SetNodeColor or NodeBody as fallback) plus a
 // frame outlining the visible canvas area. Call between BeginGraph and
 // EndGraph (after the nodes have been emitted so their last-frame screen
 // rects are up to date). Acts like a floating window above the graph: while
@@ -883,7 +884,7 @@ IMNODAL_API ImRect      GetNodeRect(Id aNodeId);                 // last-frame s
 // Typical override : a slot whose visible mark is on the right edge of
 // the content (output with icon-after-label) :
 //
-//     if (BeginOutputSlot(id)) {
+//     if (BeginSlot(id)) {
 //         SlotAlignment(ImVec2(1.0f, 0.5f));   // pivot at right edge
 //         SlotSize(ImVec2(0, 0));              // pivot is a point
 //         ImGui::TextUnformatted("name");
@@ -917,10 +918,9 @@ IMNODAL_API void SlotPivotOffset(const ImVec2& aOffsetPx);
 //
 // Example — circular reroute node :
 //
-//     NodeSettings ns;
-//     ns.flags = ImNodalNodeFlags_NoBody | ImNodalNodeFlags_HiddenInMinimap;
-//     if (ImNodal::BeginNode(nodeId, &pos, ns)) {
-//         ImNodal::BeginSlot(slotId, ImNodal::SlotRole_InOut);
+//     const auto flags = ImNodalNodeFlags_NoBody | ImNodalNodeFlags_HiddenInMinimap;
+//     if (ImNodal::BeginNode(nodeId, flags)) {
+//         ImNodal::BeginSlot(slotId);
 //         ImGui::Dummy(ImVec2(2*r, 2*r));
 //         const ImVec2 c = ImGui::GetItemRectMin() + ImVec2(r, r);
 //         ImNodalHitbox hit;
@@ -945,6 +945,38 @@ IMNODAL_API void SlotPivotOffset(const ImVec2& aOffsetPx);
 // polygons must be split by the host or replaced with a rect/circle.
 IMNODAL_API void SetSlotHitbox(const ImNodalHitbox& aHitbox);
 IMNODAL_API void SetNodeHitbox(const ImNodalHitbox& aHitbox);
+
+// =====================================================================
+// Custom node body shape — paints the node fill+border with a non-rect
+// shape (circle or convex polygon) using the theme colors (NodeBody fill,
+// NodeBorder / NodeBorderSelected outline) and the standard channels.
+//
+// Independent from SetNodeHitbox : pass the SAME shape to both to get a
+// visually-shaped node whose hit area follows the visual ; pass only the
+// body shape to keep the default AABB hit area.
+//
+// Polygon points (ImNodalHitShape_ConvexPolygon) are CALLER-OWNED — they
+// must outlive the SetNodeBodyShape call up to EndNode (same rule as
+// hitboxes). Convexity is validated by IM_ASSERT.
+//
+// Has no effect when ImNodalNodeFlags_NoBody is set (the host owns the
+// draw in that case). The polygon buffer is consumed at EndNode and the
+// override resets — call every frame.
+//
+// Example — diamond decision node, lib paints the body :
+//
+//     static ImVec2 s_pts[4] = { top, right, bottom, left };
+//     ImNodalHitbox shape;
+//     shape.type = ImNodalHitShape_ConvexPolygon;
+//     shape.polygonPoints = s_pts;
+//     shape.polygonCount = 4;
+//     if (ImNodal::BeginNode(nodeId)) {
+//         ImGui::Dummy(ImVec2(2*halfW, 2*halfH));  // reserve footprint
+//         ImNodal::SetNodeBodyShape(shape);
+//         ImNodal::SetNodeHitbox(shape);            // match the hit area
+//         ImNodal::EndNode();
+//     }
+IMNODAL_API void SetNodeBodyShape(const ImNodalHitbox& aShape);
 
 // =====================================================================
 // Navigation helpers

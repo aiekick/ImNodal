@@ -48,8 +48,8 @@ ImNodal::NewFrame();
 
 if (ImNodal::BeginCanvas("MyCanvas", ImVec2(0, 0))) {
     if (ImNodal::BeginGraph(0xCAFEull)) {
-        static ImVec2 pos(100, 100);
-        if (ImNodal::BeginNode(1, &pos)) {
+        ImNodal::SetNextNodePos(1, ImVec2(100, 100));  // init only — call once
+        if (ImNodal::BeginNode(1)) {
             // Layout assemblé via BeginLayoutHorizontal/Vertical + LayoutSpring +
             // BeginLayoutGroup (header centré, body avec inputs gauche / outputs
             // droite, LayoutSpring pour pousser à droite).
@@ -61,9 +61,9 @@ if (ImNodal::BeginCanvas("MyCanvas", ImVec2(0, 0))) {
                 ImNodal::LayoutSpring();
             ImNodal::EndLayoutHorizontal();
             ImNodal::BeginLayoutHorizontal("##body");
-                if (ImNodal::BeginInputSlot(2)) { ImGui::Text("in"); ImNodal::EndSlot(); }
+                if (ImNodal::BeginSlot(2)) { ImGui::Text("in"); ImNodal::EndSlot(); }
                 ImNodal::LayoutSpring();
-                if (ImNodal::BeginOutputSlot(3)) { ImGui::Text("out"); ImNodal::EndSlot(); }
+                if (ImNodal::BeginSlot(3)) { ImGui::Text("out"); ImNodal::EndSlot(); }
             ImNodal::EndLayoutHorizontal();
             ImNodal::EndNode();
         }
@@ -197,18 +197,42 @@ Id   GetCurrentGraphId();
 ## Node
 
 ```cpp
-struct NodeSettings {
-    bool movable          = true;
-    bool hasInnerGraph    = false;
-    bool drawHoverHandle  = false;   // top drag bar shown only on hover
-};
-
-bool BeginNode(Id nodeId, ImVec2* pos /* in/out, canvas space */, const NodeSettings& = {});
+bool BeginNode(Id nodeId, ImNodalNodeFlags flags = ImNodalNodeFlags_None);
 void EndNode();
+
+void   SetNodePos    (ImVec2 pos /* canvas space */);   // current node, inside Begin/EndNode
+void   SetNextNodePos(Id nodeId, ImVec2 pos);           // by id, anywhere
+ImVec2 GetNodePos    (Id nodeId);                       // by id, anywhere
 ```
 
-`pos` is **in/out canvas-space**. When non-null and `movable`, dragging the
-node updates it. Pass a pointer to your master copy.
+Behavior is set via `ImNodalNodeFlags_` (movable by default, opt-out with
+`NotMovable`, hide the body with `NoBody`, show a hover-handle bar with
+`HoverHandle`, etc.). Per-node knobs that are NOT binary toggles use
+`Set*` calls between Begin/End (`SetNodeColor`, `SetNodeHitbox`,
+`SetNodeBodyShape`), ImGui-style.
+
+**Position is owned by the lib.** Push an initial / restored position via
+`SetNextNodePos(id, canvasPos)` ONCE (typically at first frame or when
+loading from disk), then let `BeginNode` / drag manage it. Read it back
+via `GetNodePos(id)` for saving. Inside a `BeginNode/EndNode` scope, the
+parameterless `SetNodePos(pos)` writes to the current node (mirrors
+ImGui's `SetWindowPos`). Do NOT call either setter every frame — that
+would defeat dragging by clobbering the lib-stored position.
+
+```cpp
+// Init pass (load from disk, or first frame defaults — outside any scope)
+ImNodal::SetNextNodePos(nodeId, ImVec2(120.0f, 40.0f));
+
+// Render pass (every frame)
+if (ImNodal::BeginNode(nodeId)) {
+    // ... content ...
+    // ImNodal::SetNodePos(ImVec2(x, y));  // optional, current node, ImGui-style
+    ImNodal::EndNode();
+}
+
+// Save pass
+const ImVec2 currentPos = ImNodal::GetNodePos(nodeId);
+```
 
 ### What ImNodal paints itself
 
@@ -217,7 +241,7 @@ Inside `EndNode`, ImNodal only paints :
   with `ImNodalStyleVar_NodeRounding`).
 - the **border** (color `ImNodalCol_NodeBorder`, or `NodeBorderSelected`
   when the node is selected; thickness from `ImNodalStyleVar_NodeBorderThickness`).
-- an optional **hover-handle bar** at the top, when `NodeSettings::drawHoverHandle`
+- an optional **hover-handle bar** at the top, when `ImNodalNodeFlags_HoverHandle`
   is set and the mouse is over the node (used by reroute primitives).
 
 There is **no header tint, no body sectioning, no automatic centering**
@@ -225,6 +249,37 @@ done by ImNodal. The host owns all of that — typically by painting a
 colored band into `GetNodeBackgroundDrawList(id)` over the upper part of
 the node rect and assembling content with `BeginLayoutHorizontal/Vertical`
 + `LayoutSpring` + `BeginLayoutGroup`.
+
+### Non-rect body — `SetNodeBodyShape`
+
+Call `SetNodeBodyShape(const ImNodalHitbox&)` between `BeginNode` and
+`EndNode` to make the lib paint the body as a **circle** or **convex
+polygon** instead of the default rounded rect, using the same theme
+colors (`ImNodalCol_NodeBody` fill, `ImNodalCol_NodeBorder` /
+`NodeBorderSelected` outline) and channel ordering. `NodeRounding` is
+ignored for non-rect shapes.
+
+```cpp
+static ImVec2 pts[4] = { top, right, bottom, left };
+ImNodalHitbox shape;
+shape.type = ImNodalHitShape_ConvexPolygon;
+shape.polygonPoints = pts;
+shape.polygonCount = 4;
+
+if (ImNodal::BeginNode(nodeId)) {
+    ImGui::Dummy(ImVec2(2*halfW, 2*halfH));   // reserve footprint
+    ImNodal::SetNodeBodyShape(shape);          // lib paints the diamond
+    ImNodal::SetNodeHitbox(shape);             // same shape → clickable visual
+    ImNodal::EndNode();
+}
+```
+
+The body shape is **independent** from the hitbox — pass the same shape
+to both for a visually-shaped clickable node, or only `SetNodeBodyShape`
+to keep the default AABB hit area (generous click target around a fine
+visual). Has no effect when `ImNodalNodeFlags_NoBody` is set (the host
+owns the draw in that case). Polygon points are caller-owned and must
+outlive the call up to `EndNode` — same rule as hitboxes.
 
 ### Layout primitives — `BeginLayoutHorizontal/Vertical` + `LayoutSpring` + `BeginLayoutGroup`
 
@@ -275,9 +330,9 @@ ImNodal::EndLayoutHorizontal();
 
 // Body : inputs left, outputs right, Spring in between :
 ImNodal::BeginLayoutHorizontal("##body");
-    if (BeginInputSlot(in_id))  { ImGui::Text("in");  EndSlot(); }
+    if (BeginSlot(in_id))  { ImGui::Text("in");  EndSlot(); }
     ImNodal::LayoutSpring();
-    if (BeginOutputSlot(out_id)) { ImGui::Text("out"); EndSlot(); }
+    if (BeginSlot(out_id)) { ImGui::Text("out"); EndSlot(); }
 ImNodal::EndLayoutHorizontal();
 ```
 
@@ -298,7 +353,7 @@ read `ImGui::GetItemRectMin()` / `Max()` after `EndLayoutHorizontal`, then
 in/after `EndNode` paint the band into the node background draw list.
 
 ```cpp
-BeginNode(id, &pos);
+BeginNode(id);
     BeginLayoutHorizontal("##header");
         LayoutSpring();
         BeginLayoutGroup();
@@ -341,14 +396,16 @@ ImRect      GetNodeRect(Id nodeId);   // last-frame screen-space
 ## Slot — capture-only primitive
 
 ```cpp
-enum SlotRole_ { SlotRole_Input, SlotRole_Output, SlotRole_InOut };
-struct SlotSettings { uint32_t typeTag = 0; };
-
-bool BeginSlot       (Id, SlotRole, const SlotSettings& = {});
-bool BeginInputSlot  (Id, const SlotSettings& = {});
-bool BeginOutputSlot (Id, const SlotSettings& = {});
+bool BeginSlot(Id, ImNodalSlotFlags = ImNodalSlotFlags_None);
 void EndSlot();
 ```
+
+ImNodal does not impose any input/output/inout taxonomy on slots — every
+slot is just a hit area + link anchor. The host encodes its own typing
+(direction, data type, color ...) on its own side (typically an
+`std::unordered_map<Id, MyType>` or fields on the host's slot object) and
+applies its connection rules in `BeginConnectionCreate` / `QueryNewLink`
+/ `AcceptNewLink`.
 
 `BeginSlot` opens an ImGui group and `EndSlot` closes it. **ImNodal does
 not render anything inside** — no dot, no label, no padding. The host owns
@@ -361,7 +418,7 @@ Reserve space, emit your widgets, end the slot, then paint your dot at the
 slot pivot returned by `GetSlotScreenPos` :
 
 ```cpp
-if (ImNodal::BeginInputSlot(slotId)) {
+if (ImNodal::BeginSlot(slotId)) {
     ImGui::Dummy(ImVec2(12, 12));               // reserve room for your mark
     ImGui::SameLine(0.0f, 4.0f);
     ImGui::TextUnformatted("label");
@@ -387,8 +444,8 @@ group rect, same convention as thedmd/imgui-node-editor (`PivotAlignment
 = (0.5, 0.5)`, `PivotSize = (0, 0)`). Push it to a different edge via
 `SlotAlignment` (see below).
 
-The **link tangent** (direction the link curve leaves the slot) is now
-**derived from `slotAlignment`**, not from `SlotRole`. The mapping :
+The **link tangent** (direction the link curve leaves the slot) is
+derived from `slotAlignment`. The mapping :
 
 | alignment | tangent |
 |---|---|
@@ -398,9 +455,8 @@ The **link tangent** (direction the link curve leaves the slot) is now
 | `y ≥ 0.75` | `(0,  1)` |
 | centered (default `(0.5, 0.5)`) | `(0, 0)` — resolved dynamically by `Link` |
 
-`SlotRole_InOut` always forces a `(0, 0)` tangent (used by reroute).
-`SlotRole_Input/Output` are now purely semantic — they only feed the
-connect-rules state machine. Set the alignment to control the tangent.
+Reroute / bridge slots leave the alignment at the centered default and
+get the `(0, 0)` tangent that way.
 
 The hit rect equals the group rect (no inflation, since there is no dot to
 extend around).
@@ -412,7 +468,7 @@ substitutes a `Dummy(Style.SlotMinSize)` so the slot still has a clickable
 area :
 
 ```cpp
-if (ImNodal::BeginInputSlot(id)) ImNodal::EndSlot();   // minimal button
+if (ImNodal::BeginSlot(id)) ImNodal::EndSlot();   // minimal button
 
 // You can still paint a dot if you want :
 const ImVec2 c = ImNodal::GetSlotScreenPos(id);
@@ -442,7 +498,7 @@ the pivot is a point and `screenPos = pivot.Min`.
 
 ```cpp
 // Output whose icon is the rightmost element : push the pivot to the right edge.
-if (BeginOutputSlot(id)) {
+if (BeginSlot(id)) {
     SlotAlignment(ImVec2(1.0f, 0.5f));
     ImGui::TextUnformatted("name");
     ImGui::SameLine();
@@ -452,7 +508,7 @@ if (BeginOutputSlot(id)) {
 
 // Pivot OUTSIDE the group rect : extend the pivot rect past the right edge
 // with SlotSize, the link endpoint sits at its center.
-if (BeginOutputSlot(id)) {
+if (BeginSlot(id)) {
     SlotAlignment(ImVec2(1.0f, 0.5f));
     SlotSize     (ImVec2(16.0f, 0.0f));      // pivot rect = (right edge ... +16px)
     ImGui::TextUnformatted("name");
@@ -460,8 +516,7 @@ if (BeginOutputSlot(id)) {
 }
 ```
 
-The link tangent comes from the role (Input → -X, Output → +X) — it is
-NOT derived from the alignment.
+The link tangent is derived from `slotAlignment` (see the table above).
 
 ### Slot queries
 
@@ -470,7 +525,6 @@ ImVec2 GetSlotScreenPos(Id);       // pivot, screen space
 ImVec2 GetSlotTangent  (Id);       // unit vector pointing away from the slot
 bool   IsSlotHovered   (Id);
 bool   IsSlotConnected (Id);
-SlotRole GetSlotRole   (Id);
 ```
 
 `IsSlotHovered` is valid **between `BeginSlot` and `EndSlot`** thanks to a
@@ -485,8 +539,8 @@ ImNodal does not draw the dot, but it ships with reusable defaults under
 visual identity across slots :
 
 ```cpp
-const ImU32 col = ImNodal::GetStyleColorU32(ImNodal::ImNodalCol_SlotDot);
-const float r   = ImNodal::GetStyleVarFloat(ImNodal::ImNodalStyleVar_SlotDotRadius);
+const ImU32 col = ImNodal::GetStyleColorU32(ImNodalCol_SlotDot);
+const float r   = ImNodal::GetStyleVarFloat(ImNodalStyleVar_SlotDotRadius);
 ```
 
 The reroute primitive is the only built-in helper that reads these.
@@ -648,14 +702,15 @@ Open ImGui popups from these — they're already deferred to the right phase.
 ## Reroute nodes
 
 A reroute is a minimal pass-through node — no header / body / footer, just
-one `SlotRole_InOut` slot at the node center. Capture-only, like the slot :
+one slot at the node center (centered `slotAlignment` → `(0, 0)` tangent).
+Capture-only, like the slot :
 ImNodal sets up the geometry, sizes the hit area to a circle of
 `aHitRadius` around the slot pivot, and **the host paints the visible dot
 + selection ring AFTER `EndRerouteNode`**.
 
 ```cpp
 bool BeginRerouteNode(Id nodeId, Id slotId, ImVec2* pos,
-                      const NodeSettings& = {},
+                      ImNodalNodeFlags flags = ImNodalNodeFlags_None,
                       float hitRadius = 5.0f);
 void EndRerouteNode();
 ```
