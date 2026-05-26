@@ -14,6 +14,8 @@
 
 #include <ImNodal.h>
 
+#include <flowChart.h>
+
 #include <stdio.h>
 #define GL_SILENCE_DEPRECATION
 #if defined(IMGUI_IMPL_OPENGL_ES2)
@@ -143,10 +145,12 @@ int main(int, char**)
     //IM_ASSERT(font != nullptr);
 
     // Our state
-    bool show_imgui_demo = true;
-    bool show_imnodal_demo = true;
+    bool show_imgui_demo = false;
+    bool show_imnodal_demo = false;
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 
+	FlowChart flowChart;
+	
     // Main loop
 #ifdef __EMSCRIPTEN__
     // For an Emscripten build we are disabling file-system access, so let's not attempt to do a fopen() of the imgui.ini file.
@@ -188,6 +192,8 @@ int main(int, char**)
             ImGui::EndMainMenuBar();
         }
 
+		flowChart.display();
+		
         // Rendering
         ImGui::Render();
         int display_w, display_h;
