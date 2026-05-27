@@ -71,6 +71,10 @@ enum ImNodalCol_ {
     ImNodalCol_MiniMapBorder,      // minimap outer frame
     ImNodalCol_MiniMapNode,        // default fill for a node rect inside the minimap (used when SetNodeColor was not called for the node)
     ImNodalCol_MiniMapViewport,    // rect outlining the visible canvas inside the minimap
+    ImNodalCol_SlotBody,           // default slot fill — used by SetSlotBodyShape (idle state)
+    ImNodalCol_SlotBorder,         // default slot outline — used by SetSlotBodyShape
+    ImNodalCol_SlotHovered,        // slot fill when IsSlotHovered() — used by SetSlotBodyShape
+    ImNodalCol_SlotConnected,      // slot fill when IsSlotConnected() (and not hovered) — used by SetSlotBodyShape
     ImNodalCol_COUNT,
 };
 typedef int ImNodalCol;
@@ -623,6 +627,11 @@ IMNODAL_API ImVec2 GetSlotTangent(Id aSlotId);         // unit vector pointing a
 IMNODAL_API ImRect GetSlotHitRect(Id aSlotId);         // last frame's screen-space hit rect (= group rect of the slot)
 IMNODAL_API bool   IsSlotHovered(Id aSlotId);
 IMNODAL_API bool   IsSlotConnected(Id aSlotId);
+// No-arg overloads — read the slot currently open between BeginSlot and
+// EndSlot. Assert if called outside that scope. Use these inside a custom
+// slot drawing block to avoid repeating the id.
+IMNODAL_API bool   IsSlotHovered();
+IMNODAL_API bool   IsSlotConnected();
 
 IMNODAL_API bool   IsNodeHovered(Id* apoNodeId);        // set *apoNodeId to hovered node id if any
 IMNODAL_API bool   IsNodeSelected(Id aNodeId);
@@ -902,6 +911,22 @@ IMNODAL_API void SlotSize(const ImVec2& aSizePx);
 // half-cut by the edge. Resets to (0, 0) at EndSlot like the other two.
 IMNODAL_API void SlotPivotOffset(const ImVec2& aOffsetPx);
 
+// Absolute overrides for the link endpoint of the current slot — bypass the
+// SlotAlignment / SlotSize / SlotPivotOffset math entirely. Useful when the
+// slot draws a custom shape (triangle on the apex of a diamond node,
+// rotated polygon, ...) whose link endpoint sits on a precise screen point
+// that has no simple expression as "group-rect-fraction + offset".
+//
+// SetSlotAnchor(pos) sets the link endpoint to `pos` (screen space).
+// SetSlotTangent(dir) sets the unit vector pointing AWAY from the slot
+// side — the Link primitives use it to orient the link's first segment.
+// Pass (0, 0) for the dynamic tangent (resolved by Link from the link's
+// other endpoint).
+//
+// Both reset at EndSlot. Call between BeginSlot and EndSlot.
+IMNODAL_API void SetSlotAnchor(const ImVec2& aScreenPos);
+IMNODAL_API void SetSlotTangent(const ImVec2& aDirection);
+
 // =====================================================================
 // Custom hitbox — override the rectangular hit area of a node or slot
 // =====================================================================
@@ -951,9 +976,11 @@ IMNODAL_API void SetNodeHitbox(const ImNodalHitbox& aHitbox);
 // shape (circle or convex polygon) using the theme colors (NodeBody fill,
 // NodeBorder / NodeBorderSelected outline) and the standard channels.
 //
-// Independent from SetNodeHitbox : pass the SAME shape to both to get a
-// visually-shaped node whose hit area follows the visual ; pass only the
-// body shape to keep the default AABB hit area.
+// Auto-hitbox : SetNodeBodyShape also sets the node's hit area to the same
+// shape — no need to call SetNodeHitbox separately for the common "hit area
+// follows the visual" case. Calling SetNodeHitbox explicitly STILL wins,
+// for hosts that want a different hit area (larger for easier clicking,
+// rectangular AABB even with a polygon body, ...).
 //
 // Polygon points (ImNodalHitShape_ConvexPolygon) are CALLER-OWNED — they
 // must outlive the SetNodeBodyShape call up to EndNode (same rule as
@@ -963,7 +990,7 @@ IMNODAL_API void SetNodeHitbox(const ImNodalHitbox& aHitbox);
 // draw in that case). The polygon buffer is consumed at EndNode and the
 // override resets — call every frame.
 //
-// Example — diamond decision node, lib paints the body :
+// Example — diamond decision node, lib paints the body + hits the diamond :
 //
 //     static ImVec2 s_pts[4] = { top, right, bottom, left };
 //     ImNodalHitbox shape;
@@ -972,11 +999,38 @@ IMNODAL_API void SetNodeHitbox(const ImNodalHitbox& aHitbox);
 //     shape.polygonCount = 4;
 //     if (ImNodal::BeginNode(nodeId)) {
 //         ImGui::Dummy(ImVec2(2*halfW, 2*halfH));  // reserve footprint
-//         ImNodal::SetNodeBodyShape(shape);
-//         ImNodal::SetNodeHitbox(shape);            // match the hit area
+//         ImNodal::SetNodeBodyShape(shape);        // body + hitbox in one call
 //         ImNodal::EndNode();
 //     }
 IMNODAL_API void SetNodeBodyShape(const ImNodalHitbox& aShape);
+
+// Same idea for a slot — paints the slot fill+border with the given shape
+// using ImNodalCol_SlotBody / ImNodalCol_SlotBorder, AND sets the slot's
+// hit area to that shape (unless SetSlotHitbox was called explicitly).
+//
+// Drawn on the current channel inside EndSlot, so a host widget emitted
+// between BeginSlot and EndSlot ends up UNDER the body. The typical use
+// case is "the shape IS the slot's visual" — no inner content. Pair with
+// SetSlotAnchor when the link endpoint should land on a specific point
+// of the shape (e.g. the apex of a triangle), not at the group center.
+//
+// Polygon points (ImNodalHitShape_ConvexPolygon) are CALLER-OWNED and
+// must outlive the call up to EndSlot. The override resets at EndSlot —
+// call every frame.
+//
+// Example — triangular input slot at the top apex of a diamond node :
+//
+//     if (ImNodal::BeginSlot(slotId)) {
+//         ImNodalHitbox shape;
+//         shape.type = ImNodalHitShape_ConvexPolygon;
+//         shape.polygonPoints = triPoints;   // 3 points around the apex
+//         shape.polygonCount = 3;
+//         ImNodal::SetSlotBodyShape(shape);  // body + hit area
+//         ImNodal::SetSlotAnchor(apex);      // link lands on the apex
+//         ImNodal::SetSlotTangent(ImVec2(0.0f, -1.0f));  // link points up
+//         ImNodal::EndSlot();
+//     }
+IMNODAL_API void SetSlotBodyShape(const ImNodalHitbox& aShape);
 
 // =====================================================================
 // Navigation helpers
