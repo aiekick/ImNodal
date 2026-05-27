@@ -12,4 +12,7 @@
 class FlowChart {
 public:
     void display();
+
+private:
+    void m_drawConditionalNode(const char* apLabel, const ImNodal::Id aNodeId);
 };
