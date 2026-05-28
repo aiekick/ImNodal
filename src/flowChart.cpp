@@ -309,7 +309,7 @@ void FlowChart::m_drawConditionalNode(const char* apLabel, const ImNodal::Id aNo
         s_node_pts[1] = ImVec2(center.x, rect.Min.y);
         s_node_pts[2] = ImVec2(rect.Max.x, center.y);
         s_node_pts[3] = ImVec2(center.x, rect.Max.y);
-        ImNodalHitbox node_shape;
+        ImNodalShape node_shape;
         node_shape.type = ImNodalHitShape_ConvexPolygon;
         node_shape.polygonPoints = s_node_pts;
         node_shape.polygonCount = 4;
@@ -318,6 +318,26 @@ void FlowChart::m_drawConditionalNode(const char* apLabel, const ImNodal::Id aNo
         // top : input
         const auto slotId = aNodeId * 100 + 1;
         if (ImNodal::BeginSlot(slotId)) {
+            static ImVec2 s_slot_pts[3];
+            s_slot_pts[0] = ImLerp(s_node_pts[1], s_node_pts[0], 0.25f);
+            s_slot_pts[1] = s_node_pts[1];
+            s_slot_pts[2] = ImLerp(s_node_pts[1], s_node_pts[2], 0.25f);
+            ImNodalShape slot_shape;
+            slot_shape.type = ImNodalHitShape_ConvexPolygon;
+            slot_shape.polygonPoints = s_slot_pts;
+            slot_shape.polygonCount = 3;
+            ImNodal::SetSlotBodyShape(slot_shape);
+            ImNodal::SetSlotAnchor(s_slot_pts[1]);
+            ImNodal::SetSlotTangent(ImVec2(0.0f, -1.0f));
+            // ImNodal::SetSlotHitbox(slot_shape);
+            // const ImU32 col = ImNodal::IsSlotHovered(slotId) ? IM_COL32(255, 220, 120, 255) : (ImNodal::IsSlotConnected(slotId) ? IM_COL32(120, 200, 255, 255) : IM_COL32(100, 100, 100, 100));
+            // ImGui::GetWindowDrawList()->AddConvexPolyFilled(slot_shape.polygonPoints, slot_shape.polygonCount, col);
+            ImNodal::EndSlot();
+        }
+
+        // left : output : no
+        //const auto slotId = aNodeId * 100 + 1;
+        /* if (ImNodal::BeginSlot(slotId)) {
             static ImVec2 s_slot_pts[3];
             s_slot_pts[0] = (s_node_pts[0] + s_node_pts[1]) * 0.5f;
             s_slot_pts[1] = s_node_pts[1];
@@ -333,7 +353,7 @@ void FlowChart::m_drawConditionalNode(const char* apLabel, const ImNodal::Id aNo
             // const ImU32 col = ImNodal::IsSlotHovered(slotId) ? IM_COL32(255, 220, 120, 255) : (ImNodal::IsSlotConnected(slotId) ? IM_COL32(120, 200, 255, 255) : IM_COL32(100, 100, 100, 100));
             // ImGui::GetWindowDrawList()->AddConvexPolyFilled(slot_shape.polygonPoints, slot_shape.polygonCount, col);
             ImNodal::EndSlot();
-        }
+        }*/
 
         ImNodal::EndNode();
     }
