@@ -61,14 +61,14 @@ struct SlotState {
     // behavior). Otherwise the shape drives hit-tests; lastHitRect still
     // holds the AABB (used for ImGui::ItemAdd / culling and the EndGraph
     // hover frame).
-    ImNodalHitbox customHitbox{};
+    ImNodalShape customHitbox{};
     // Custom slot body shape set by SetSlotBodyShape between Begin/EndSlot.
     // type==None → no paint (legacy "host paints its own dot" behavior).
     // Circle or ConvexPolygon → EndSlot paints fill (ImNodalCol_SlotBody) +
     // outline (ImNodalCol_SlotBorder). Body shape and hitbox are independent
     // — SetSlotBodyShape auto-sets the hitbox, but an explicit SetSlotHitbox
     // call still wins.
-    ImNodalHitbox bodyShape{};
+    ImNodalShape bodyShape{};
     bool hovered{false};
     bool ctxMenuRequested{false};  // set by EndSlot when right-clicked
     bool connected{false};         // set by Link() — RESET each NewFrame, then set again by Link() AFTER all Begin/EndSlot ran
@@ -90,14 +90,14 @@ struct NodeState {
     // Custom node hitbox set by SetNodeHitbox between Begin/EndNode. type==None
     // means "use the rectangular nodeMin/nodeMax for hover/click tests" (the
     // legacy behavior). Otherwise the shape drives hit-tests.
-    ImNodalHitbox customHitbox{};
+    ImNodalShape customHitbox{};
     // Custom node body shape set by SetNodeBodyShape between Begin/EndNode.
     // type==None (or Rect) → default rounded rect fill+border. Circle or
     // ConvexPolygon → ImNodal paints the body in that shape using the theme
     // colors (NodeBody for fill, NodeBorder / NodeBorderSelected for outline).
     // Hitbox and body shape are independent — the host may set one without
     // the other, or pass the same shape to both for a clickable polygon.
-    ImNodalHitbox bodyShape{};
+    ImNodalShape bodyShape{};
     // Max natural width/height of all TOP-LEVEL BeginLayoutHorizontal/Vertical containers emitted
     // inside this node. Used by "fill parent" mode of subsequent toplevel
     // containers to size against their siblings rather than against
@@ -420,12 +420,12 @@ struct CanvasState {
     // Staging hitboxes filled by SetSlotHitbox / SetNodeHitbox between
     // Begin* and End*. Read + applied at End* into the matching state, then
     // reset to "no override" so the next slot/node starts fresh.
-    ImNodalHitbox stagingSlotHitbox{};
-    ImNodalHitbox stagingNodeHitbox{};
+    ImNodalShape stagingSlotHitbox{};
+    ImNodalShape stagingNodeHitbox{};
     // Staging body shapes filled by SetNodeBodyShape / SetSlotBodyShape
     // between Begin*/End*. Same lifecycle as the hitbox stagings.
-    ImNodalHitbox stagingNodeBodyShape{};
-    ImNodalHitbox stagingSlotBodyShape{};
+    ImNodalShape stagingNodeBodyShape{};
+    ImNodalShape stagingSlotBodyShape{};
 
     // Global "selected link" for standalone (outside-of-graph) link queries.
     // Lives at canvas level (not graph) since a standalone link has no graph.
@@ -612,11 +612,11 @@ static void s_doNewFrame(Context& arCtx) {
         c.slotTangentSet = false;
         c.slotTangentDir = ImVec2(0.0f, 0.0f);
         // Drop any staging hitbox / body shape a host forgot to consume by
-        // closing its matching Begin/End scope last frame. ImNodalHitbox{} == None.
-        c.stagingSlotHitbox = ImNodalHitbox{};
-        c.stagingNodeHitbox = ImNodalHitbox{};
-        c.stagingSlotBodyShape = ImNodalHitbox{};
-        c.stagingNodeBodyShape = ImNodalHitbox{};
+        // closing its matching Begin/End scope last frame. ImNodalShape{} == None.
+        c.stagingSlotHitbox = ImNodalShape{};
+        c.stagingNodeHitbox = ImNodalShape{};
+        c.stagingSlotBodyShape = ImNodalShape{};
+        c.stagingNodeBodyShape = ImNodalShape{};
     }
 
     for (auto& kv : arCtx.slots) {
@@ -948,6 +948,7 @@ Style::Style() {
     NodeBodyPadding = 6.0f;
     NodeHoverHandleHeight = 4.0f;
     SlotMinSize = ImVec2(12.0f, 12.0f);
+    SlotBorderThickness = 1.0f;
     LinkThickness = 3.0f;
     GridSize = ImVec2(50.0f, 50.0f);
     GridSubdivs = ImVec2(5.0f, 5.0f);
@@ -971,6 +972,7 @@ IMNODAL_API float GetStyleVarFloat(ImNodalStyleVar aIdx) {
         case ImNodalStyleVar_NodeBodyPadding: return s.NodeBodyPadding;
         case ImNodalStyleVar_NodeHoverHandleHeight: return s.NodeHoverHandleHeight;
         case ImNodalStyleVar_LinkThickness: return s.LinkThickness;
+        case ImNodalStyleVar_SlotBorderThickness: return s.SlotBorderThickness;
         default: return 0.0f;
     }
     return 0.0f;
@@ -1013,6 +1015,7 @@ inline float* s_styleVarFloatPtr(Style& s, ImNodalStyleVar aIdx) {
         case ImNodalStyleVar_NodeBodyPadding: return &s.NodeBodyPadding;
         case ImNodalStyleVar_NodeHoverHandleHeight: return &s.NodeHoverHandleHeight;
         case ImNodalStyleVar_LinkThickness: return &s.LinkThickness;
+        case ImNodalStyleVar_SlotBorderThickness: return &s.SlotBorderThickness;
         default: return nullptr;
     }
 }
@@ -1112,6 +1115,7 @@ IMNODAL_API const char* GetStyleVarName(ImNodalStyleVar aIdx) {
         case ImNodalStyleVar_NodeHoverHandleHeight: return "NodeHoverHandleHeight";
         case ImNodalStyleVar_SlotMinSize: return "SlotMinSize";
         case ImNodalStyleVar_LinkThickness: return "LinkThickness";
+        case ImNodalStyleVar_SlotBorderThickness: return "SlotBorderThickness";
         case ImNodalStyleVar_GridSize: return "GridSize";
         case ImNodalStyleVar_GridSubdivs: return "GridSubdivs";
         default: return "Unknown";
@@ -1150,6 +1154,7 @@ IMNODAL_API void ShowStyleVarsEditor() {
         s.NodeHoverHandleHeight = def.NodeHoverHandleHeight;
         s.SlotMinSize = def.SlotMinSize;
         s.LinkThickness = def.LinkThickness;
+        s.SlotBorderThickness = def.SlotBorderThickness;
         s.GridSize = def.GridSize;
         s.GridSubdivs = def.GridSubdivs;
     }
@@ -1168,6 +1173,7 @@ IMNODAL_API void ShowStyleVarsEditor() {
             case ImNodalStyleVar_NodeBodyPadding: return {0.0f, 32.0f, 0.5f};
             case ImNodalStyleVar_NodeHoverHandleHeight: return {0.0f, 32.0f, 0.5f};
             case ImNodalStyleVar_LinkThickness: return {0.5f, 16.0f, 0.1f};
+            case ImNodalStyleVar_SlotBorderThickness: return {0.5f, 8.0f, 0.1f};
             default: return {0.0f, 100.0f, 0.5f};
         }
     };
@@ -1772,7 +1778,7 @@ static bool s_isConvexPolygon(const ImVec2* apPoints, int aCount) {
 //   Rect   -> standard AABB containment.
 //   Circle -> radial distance test.
 //   ConvexPolygon -> all cross(edge_i, mouse - p_i) share the same sign.
-static bool s_hitTestShape(const ImNodalHitbox& arShape, const ImVec2& aMouse, const ImRect& arFallbackRect) {
+static bool s_hitTestShape(const ImNodalShape& arShape, const ImVec2& aMouse, const ImRect& arFallbackRect) {
     switch (arShape.type) {
         case ImNodalHitShape_Rect: {
             return aMouse.x >= arShape.rect.Min.x && aMouse.x <= arShape.rect.Max.x &&
@@ -1814,7 +1820,7 @@ static bool s_hitTestShape(const ImNodalHitbox& arShape, const ImVec2& aMouse, c
 
 // AABB englobing a shape — used for ImGui::ItemAdd / culling. Falls back
 // to the supplied rect when the shape has no override.
-static ImRect s_hitTestAABB(const ImNodalHitbox& arShape, const ImRect& arFallbackRect) {
+static ImRect s_hitTestAABB(const ImNodalShape& arShape, const ImRect& arFallbackRect) {
     switch (arShape.type) {
         case ImNodalHitShape_Rect:
             return arShape.rect;
@@ -2168,8 +2174,8 @@ IMNODAL_API bool BeginNode(Id aNodeId, ImNodalNodeFlags aFlags) {
     NodeState& rNode = rCtx.nodes[aNodeId];
     rNode.graphId = rCtx.Graph().id;
     rNode.flags = aFlags;
-    rNode.customHitbox = ImNodalHitbox{};  // SetNodeHitbox between Begin/End writes here
-    rNode.bodyShape = ImNodalHitbox{};     // SetNodeBodyShape between Begin/End writes here
+    rNode.customHitbox = ImNodalShape{};  // SetNodeHitbox between Begin/End writes here
+    rNode.bodyShape = ImNodalShape{};     // SetNodeBodyShape between Begin/End writes here
     rNode.currentMaxToplevelNatWidth = 0.0f;
     rNode.currentMaxToplevelNatHeight = 0.0f;
     rNode.color = 0;  // SetNodeColor between Begin/End writes here, reset each frame
@@ -2237,8 +2243,8 @@ IMNODAL_API void EndNode() {
     } else if (rCtx.Canvas().stagingNodeBodyShape.type != ImNodalHitShape_None) {
         rNode.customHitbox = rCtx.Canvas().stagingNodeBodyShape;
     }
-    rCtx.Canvas().stagingNodeHitbox = ImNodalHitbox{};
-    rCtx.Canvas().stagingNodeBodyShape = ImNodalHitbox{};
+    rCtx.Canvas().stagingNodeHitbox = ImNodalShape{};
+    rCtx.Canvas().stagingNodeBodyShape = ImNodalShape{};
 
     // Hover test : the rectangular fallback covers the legacy "node = AABB"
     // behavior. A custom hitbox (SetNodeHitbox) overrides the shape — used
@@ -2585,8 +2591,8 @@ IMNODAL_API bool BeginSlot(Id aSlotId, ImNodalSlotFlags aFlags) {
     // SetSlotHitbox / SetSlotBodyShape between Begin/End write here. Reset
     // before the early hover test so a missing call falls back to the
     // last-frame rect (hitbox) or to "no paint" (body shape).
-    rSlot.customHitbox = ImNodalHitbox{};
-    rSlot.bodyShape = ImNodalHitbox{};
+    rSlot.customHitbox = ImNodalShape{};
+    rSlot.bodyShape = ImNodalShape{};
 
     // EARLY hover hit-test against the previous frame's hit shape. Without this,
     // rSlot.hovered would stay false until EndSlot — but the host typically
@@ -2704,8 +2710,8 @@ IMNODAL_API void EndSlot() {
     } else if (rCtx.Canvas().stagingSlotBodyShape.type != ImNodalHitShape_None) {
         rSlot.customHitbox = rCtx.Canvas().stagingSlotBodyShape;
     }
-    rCtx.Canvas().stagingSlotHitbox = ImNodalHitbox{};
-    rCtx.Canvas().stagingSlotBodyShape = ImNodalHitbox{};
+    rCtx.Canvas().stagingSlotHitbox = ImNodalShape{};
+    rCtx.Canvas().stagingSlotBodyShape = ImNodalShape{};
 
     // Hit area : the group rect by default. SetSlotHitbox lets the host
     // override the shape (circle for reroute dots, polygon for diamond
@@ -2788,7 +2794,7 @@ IMNODAL_API void EndSlot() {
             : rSlot.connectedLastFrame ? rCtx.style.Colors[ImNodalCol_SlotConnected]
             : rCtx.style.Colors[ImNodalCol_SlotBody];
         const ImU32 borderCol = rCtx.style.Colors[ImNodalCol_SlotBorder];
-        const float borderThk = rCtx.style.NodeBorderThickness;
+        const float borderThk = rCtx.style.SlotBorderThickness;
         switch (rSlot.bodyShape.type) {
             case ImNodalHitShape_Circle: {
                 pDrawList->AddCircleFilled(rSlot.bodyShape.center, rSlot.bodyShape.radius, fillCol);
@@ -4214,7 +4220,7 @@ IMNODAL_API void SetSlotTangent(const ImVec2& aDirection) {
 // override the rectangular hit area. Convex polygons are validated here
 // once per call (debug assert) — never per hit-test.
 
-IMNODAL_API void SetSlotHitbox(const ImNodalHitbox& aHitbox) {
+IMNODAL_API void SetSlotHitbox(const ImNodalShape& aHitbox) {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.Graph().currentSlotId != 0 && "SetSlotHitbox must be called between BeginSlot/EndSlot");
     if (aHitbox.type == ImNodalHitShape_ConvexPolygon) {
@@ -4224,7 +4230,7 @@ IMNODAL_API void SetSlotHitbox(const ImNodalHitbox& aHitbox) {
     rCtx.Canvas().stagingSlotHitbox = aHitbox;
 }
 
-IMNODAL_API void SetNodeHitbox(const ImNodalHitbox& aHitbox) {
+IMNODAL_API void SetNodeHitbox(const ImNodalShape& aHitbox) {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.Graph().currentNodeId != 0 && "SetNodeHitbox must be called between BeginNode/EndNode");
     if (aHitbox.type == ImNodalHitShape_ConvexPolygon) {
@@ -4234,7 +4240,7 @@ IMNODAL_API void SetNodeHitbox(const ImNodalHitbox& aHitbox) {
     rCtx.Canvas().stagingNodeHitbox = aHitbox;
 }
 
-IMNODAL_API void SetNodeBodyShape(const ImNodalHitbox& aShape) {
+IMNODAL_API void SetNodeBodyShape(const ImNodalShape& aShape) {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.Graph().currentNodeId != 0 && "SetNodeBodyShape must be called between BeginNode/EndNode");
     if (aShape.type == ImNodalHitShape_ConvexPolygon) {
@@ -4244,7 +4250,7 @@ IMNODAL_API void SetNodeBodyShape(const ImNodalHitbox& aShape) {
     rCtx.Canvas().stagingNodeBodyShape = aShape;
 }
 
-IMNODAL_API void SetSlotBodyShape(const ImNodalHitbox& aShape) {
+IMNODAL_API void SetSlotBodyShape(const ImNodalShape& aShape) {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.Graph().currentSlotId != 0 && "SetSlotBodyShape must be called between BeginSlot/EndSlot");
     if (aShape.type == ImNodalHitShape_ConvexPolygon) {

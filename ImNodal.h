@@ -95,6 +95,7 @@ enum ImNodalStyleVar_ {
     ImNodalStyleVar_NodeHoverHandleHeight,  // float
     ImNodalStyleVar_SlotMinSize,            // ImVec2 — Dummy size used when BeginSlot/EndSlot encloses no widget
     ImNodalStyleVar_LinkThickness,          // float (default when Link() gets thickness=0)
+    ImNodalStyleVar_SlotBorderThickness,    // float
     ImNodalStyleVar_GridSize,               // ImVec2
     ImNodalStyleVar_GridSubdivs,            // ImVec2
     ImNodalStyleVar_COUNT,
@@ -173,14 +174,15 @@ enum ImNodalHitShape_ {
 };
 typedef int ImNodalHitShape;
 
-struct ImNodalHitbox {
+struct ImNodalShape {
     ImNodalHitShape type{ImNodalHitShape_None};
-    ImRect          rect{};               // ImNodalHitShape_Rect
-    ImVec2          center{};             // ImNodalHitShape_Circle
-    float           radius{0.0f};         // ImNodalHitShape_Circle
-    const ImVec2*   polygonPoints{nullptr};  // ImNodalHitShape_ConvexPolygon — caller-owned, must outlive the call
-    int             polygonCount{0};
-    ImNodalHitbox() = default;
+    ImRect rect{};                         // ImNodalHitShape_Rect
+    ImVec2 center{};                       // ImNodalHitShape_Circle
+    float radius{0.0f};                    // ImNodalHitShape_Circle
+    const ImVec2* polygonPoints{nullptr};  // ImNodalHitShape_ConvexPolygon — caller-owned, must outlive the call
+    int polygonCount{0};
+    float thickness{1.0f};
+    ImNodalShape() = default;
 };
 
 namespace ImNodal {
@@ -259,12 +261,13 @@ IMNODAL_API bool     HasEditor(const char* aCanvasId, Id aGraphId);
 
 struct Style {
     ImU32  Colors[ImNodalCol_COUNT];
-    float  NodeRounding;
-    float  NodeBorderThickness;
-    float  NodeBodyPadding;
-    float  NodeHoverHandleHeight;
+    float NodeRounding;
+    float NodeBorderThickness;
+    float NodeBodyPadding;
+    float NodeHoverHandleHeight;
     ImVec2 SlotMinSize;
-    float  LinkThickness;
+    float SlotBorderThickness;
+    float LinkThickness;
     ImVec2 GridSize;
     ImVec2 GridSubdivs;
 
@@ -968,8 +971,8 @@ IMNODAL_API void SetSlotTangent(const ImVec2& aDirection);
 // Convex polygons only — ConvexPolygon hitboxes are validated at the
 // SetSlotHitbox / SetNodeHitbox call via IM_ASSERT (debug only). Concave
 // polygons must be split by the host or replaced with a rect/circle.
-IMNODAL_API void SetSlotHitbox(const ImNodalHitbox& aHitbox);
-IMNODAL_API void SetNodeHitbox(const ImNodalHitbox& aHitbox);
+IMNODAL_API void SetSlotHitbox(const ImNodalShape& aHitbox);
+IMNODAL_API void SetNodeHitbox(const ImNodalShape& aHitbox);
 
 // =====================================================================
 // Custom node body shape — paints the node fill+border with a non-rect
@@ -1002,7 +1005,7 @@ IMNODAL_API void SetNodeHitbox(const ImNodalHitbox& aHitbox);
 //         ImNodal::SetNodeBodyShape(shape);        // body + hitbox in one call
 //         ImNodal::EndNode();
 //     }
-IMNODAL_API void SetNodeBodyShape(const ImNodalHitbox& aShape);
+IMNODAL_API void SetNodeBodyShape(const ImNodalShape& aShape);
 
 // Same idea for a slot — paints the slot fill+border with the given shape
 // using ImNodalCol_SlotBody / ImNodalCol_SlotBorder, AND sets the slot's
@@ -1030,7 +1033,7 @@ IMNODAL_API void SetNodeBodyShape(const ImNodalHitbox& aShape);
 //         ImNodal::SetSlotTangent(ImVec2(0.0f, -1.0f));  // link points up
 //         ImNodal::EndSlot();
 //     }
-IMNODAL_API void SetSlotBodyShape(const ImNodalHitbox& aShape);
+IMNODAL_API void SetSlotBodyShape(const ImNodalShape& aShape);
 
 // =====================================================================
 // Navigation helpers

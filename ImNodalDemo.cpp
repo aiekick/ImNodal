@@ -965,7 +965,7 @@ static void s_sectionDiamond() {
         // Lib paints the body using the theme colors (NodeBody fill +
         // NodeBorder / NodeBorderSelected outline). Same shape as hitbox
         // → clickable visual.
-        ImNodalHitbox shape;
+        ImNodalShape shape;
         shape.type = ImNodalHitShape_ConvexPolygon;
         shape.polygonPoints = s_nodePts;
         shape.polygonCount = 4;
@@ -1001,7 +1001,7 @@ static void s_sectionDiamond() {
             s_slotPts[2] = ImVec2(aCornerPos.x,     aCornerPos.y + r);
             s_slotPts[3] = ImVec2(aCornerPos.x - r, aCornerPos.y    );
 
-            ImNodalHitbox slotHit;
+            ImNodalShape slotHit;
             slotHit.type = ImNodalHitShape_ConvexPolygon;
             slotHit.polygonPoints = s_slotPts;
             slotHit.polygonCount = 4;
@@ -1065,7 +1065,7 @@ static void s_sectionDiamond() {
         "if (ImNodal::BeginNode(nodeId, ImNodalNodeFlags_HiddenInMinimap)) {\n"
         "    ImGui::Dummy(ImVec2(2*halfW, 2*halfH));  // reserve footprint\n"
         "    ImVec2 nodePts[4] = { top, right, bottom, left };\n"
-        "    ImNodalHitbox h;\n"
+        "    ImNodalShape h;\n"
         "    h.type = ImNodalHitShape_ConvexPolygon;\n"
         "    h.polygonPoints = nodePts; h.polygonCount = 4;\n"
         "    ImNodal::SetNodeBodyShape(h);  // lib paints fill+border with theme colors\n"
@@ -1076,7 +1076,7 @@ static void s_sectionDiamond() {
         "            ImVec2(c.x,   c.y-r), ImVec2(c.x+r, c.y),\n"
         "            ImVec2(c.x,   c.y+r), ImVec2(c.x-r, c.y),\n"
         "        };\n"
-        "        ImNodalHitbox sh;\n"
+        "        ImNodalShape sh;\n"
         "        sh.type = ImNodalHitShape_ConvexPolygon;\n"
         "        sh.polygonPoints = slotPts; sh.polygonCount = 4;\n"
         "        ImNodal::SetSlotHitbox(sh);\n"
