@@ -2412,7 +2412,24 @@ inline ImVec2 s_resolveLayoutTarget(Context& arCtx, const ImVec2& aSize) {
     // Compute parent target along axes that need filling.
     ImVec2 parentTarget(0.0f, 0.0f);
     if (!arCtx.Graph().layoutStack.empty()) {
-        parentTarget = arCtx.Graph().layoutStack.back().targetSize;
+        const LayoutContainer& parent = arCtx.Graph().layoutStack.back();
+        parentTarget = parent.targetSize;
+        // thedmd-style cross-axis stretch : along an axis the parent does NOT
+        // force (resolved target 0 = natural = the parent's cross axis), a
+        // "fill parent" child stretches to the parent's MEASURED content size
+        // from the previous frame instead of collapsing to 0. Without this a
+        // LayoutSpring inside a narrower child gets no slack and cannot push —
+        // which defeats the whole purpose of a spring. One frame of latency is
+        // expected : frame 1 measures the natural size, frame 2 the springs fill.
+        const auto parentSlotIt = arCtx.Graph().layoutSlots.find(parent.id);
+        if (parentSlotIt != arCtx.Graph().layoutSlots.end()) {
+            if (parentTarget.x <= 0.0f) {
+                parentTarget.x = parentSlotIt->second.lastNatWidth;
+            }
+            if (parentTarget.y <= 0.0f) {
+                parentTarget.y = parentSlotIt->second.lastNatHeight;
+            }
+        }
     } else if (arCtx.Graph().currentNodeId != 0) {
         // Top-level container of a node : reference is the max natural size
         // of the OTHER top-level containers (header, footer…) measured at the
@@ -2575,6 +2592,62 @@ IMNODAL_API void LayoutSpring(float aWeight) {
         ImGui::Dummy(ImVec2(0.0f, fill));
     }
     c.consumedAlongAxis += fill;
+}
+
+// -----------------------------
+// Node content scaffold — sugar over the layout primitives (see header).
+// Pure composition : each helper only calls public primitives, no new state.
+// -----------------------------
+IMNODAL_API bool BeginHeader() {
+    BeginLayoutHorizontal("##imnodal_header");  // default {-1,0} : fills node width
+    LayoutSpring();                             // center the title group
+    return BeginLayoutGroup();
+}
+IMNODAL_API void EndHeader() {
+    EndLayoutGroup();
+    LayoutSpring();
+    EndLayoutHorizontal();
+}
+
+IMNODAL_API bool BeginContent() {
+    return BeginLayoutHorizontal("##imnodal_content");  // default {-1,0} : fills node width, holds the columns
+}
+IMNODAL_API void EndContent() {
+    EndLayoutHorizontal();
+}
+
+IMNODAL_API bool BeginInputs() {
+    return BeginLayoutVertical("##imnodal_inputs", ImVec2(0.0f, 0.0f));  // LEFT column, natural size (top-packed)
+}
+IMNODAL_API void EndInputs() {
+    EndLayoutVertical();
+}
+
+IMNODAL_API bool BeginBody() {
+    LayoutSpring();  // separates the middle column off the inputs
+    return BeginLayoutVertical("##imnodal_body", ImVec2(0.0f, 0.0f));  // MIDDLE column, natural size
+}
+IMNODAL_API void EndBody() {
+    EndLayoutVertical();
+}
+
+IMNODAL_API bool BeginOutputs() {
+    LayoutSpring();  // pushes the outputs column toward the right edge
+    return BeginLayoutVertical("##imnodal_outputs", ImVec2(0.0f, 0.0f));  // RIGHT column, natural size (top-packed)
+}
+IMNODAL_API void EndOutputs() {
+    EndLayoutVertical();
+}
+
+IMNODAL_API bool BeginFooter() {
+    BeginLayoutHorizontal("##imnodal_footer");
+    LayoutSpring();
+    return BeginLayoutGroup();
+}
+IMNODAL_API void EndFooter() {
+    EndLayoutGroup();
+    LayoutSpring();
+    EndLayoutHorizontal();
 }
 
 // -----------------------------

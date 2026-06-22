@@ -575,6 +575,54 @@ IMNODAL_API void LayoutSpring(float aWeight = 1.0f);
 IMNODAL_API bool BeginLayoutGroup();
 IMNODAL_API void EndLayoutGroup();
 
+// =====================================================================
+// Node content scaffold — opinionated Begin/End sugar over the layout
+// primitives above (same ImGui idiom). They pre-wire the common node
+// template — centered title row, then a content row holding an inputs
+// column on the LEFT, an optional middle column, and an outputs column on
+// the RIGHT, plus an optional footer row — so the host stops repeating the
+// BeginLayout* + LayoutSpring boilerplate. Pure composition : each helper
+// only calls the public primitives, emits nothing the host could not emit
+// by hand. A host wanting another node shape ignores these and drives
+// BeginLayout* directly.
+//
+// Pairing rule (like BeginLayout*) : ALWAYS call the matching EndXxx. The
+// returned bool is informational, NOT a "skip the body" gate ; EndNode
+// asserts the layout stack is balanced.
+//
+// Slots stay the host's job : inside BeginInputs/BeginOutputs the host
+// loops its ports and emits each one with the raw BeginSlot + SlotAlignment
+// + SlotPivotOffset + EndSlot — the scaffold only owns the containers and
+// the springs between them.
+//
+//   BeginHeader  : BeginLayoutHorizontal + LayoutSpring + BeginLayoutGroup  (title centered)
+//   BeginContent : BeginLayoutHorizontal (fills the node width)             (row holding the columns)
+//   BeginInputs  : BeginLayoutVertical (natural size)                       (LEFT column, ports packed from the top)
+//   BeginBody    : LayoutSpring + BeginLayoutVertical (natural size)        (MIDDLE column, pushed off the inputs)
+//   BeginOutputs : LayoutSpring + BeginLayoutVertical (natural size)        (RIGHT column, pushed to the right edge)
+//   BeginFooter  : BeginLayoutHorizontal + LayoutSpring + BeginLayoutGroup  (footer centered, under the content)
+//
+// Columns are NATURAL height on purpose : inputs and outputs are independent
+// and stay TOP-aligned (ports packed from the top with uniform spacing),
+// never stretched to a common height. A leading LayoutSpring in BeginBody
+// and BeginOutputs separates the columns (off the inputs / to the right).
+//
+// Content order contract : inside BeginContent/EndContent call BeginInputs,
+// then optionally BeginBody, then BeginOutputs (the separating springs live
+// in BeginBody and BeginOutputs). Any column may be omitted.
+IMNODAL_API bool BeginHeader();
+IMNODAL_API void EndHeader();
+IMNODAL_API bool BeginContent();
+IMNODAL_API void EndContent();
+IMNODAL_API bool BeginInputs();
+IMNODAL_API void EndInputs();
+IMNODAL_API bool BeginBody();
+IMNODAL_API void EndBody();
+IMNODAL_API bool BeginOutputs();
+IMNODAL_API void EndOutputs();
+IMNODAL_API bool BeginFooter();
+IMNODAL_API void EndFooter();
+
 // -----------------------------
 // Slot (primitive — usable anywhere)
 // -----------------------------
