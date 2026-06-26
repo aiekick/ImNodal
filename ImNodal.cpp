@@ -216,10 +216,13 @@ struct GraphState {
     ImVec2 currentSlotBeginCursor{};
 
     // -----------------------------
-    // Active drag target (node being dragged, 0 = none)
+    // Active drag target (0 = none). draggingNodeId is the "anchor" the user
+    // grabbed ; dragStartPositions holds the start canvas-pos of EVERY selected
+    // movable node so the whole selection translates together (group drag). A
+    // single-node drag is just a group of one.
     // -----------------------------
     Id draggingNodeId{0};
-    ImVec2 dragStartNodePos{};
+    std::unordered_map<Id, ImVec2> dragStartPositions;
     ImVec2 dragStartMouseCanvas{};
 
     // -----------------------------
@@ -597,6 +600,12 @@ static void s_doNewFrame(Context& arCtx) {
         // Drag stale-clear (per-graph).
         if (g.draggingFromSlot != 0 && mouseUp && !onReleaseFrame) {
             g.draggingFromSlot = 0;
+        }
+        // Same safety for the node group-drag : the anchor node may have stopped
+        // being emitted mid-drag, so EndNode never saw the release.
+        if (g.draggingNodeId != 0 && mouseUp && !onReleaseFrame) {
+            g.draggingNodeId = 0;
+            g.dragStartPositions.clear();
         }
     }
 
@@ -1954,6 +1963,14 @@ static void s_commitBoxSelect(Context& arCtx, GraphState& arGraph, const ImVec2&
         }
     }
 
+    // A replace-mode box that ended up empty (dragged across the background,
+    // no node/link touched) must NOT wipe the current selection — the user was
+    // just dragging on the canvas. Only a plain left-CLICK on empty clears the
+    // selection (handled in EndCanvas). In toggle/additive mode the base is
+    // preserved anyway, so this guard only affects the replace case.
+    if (!toggle && newNodes.empty() && newLinks.empty()) {
+        return;
+    }
     if (newNodes != arGraph.selectedNodes || newLinks != arGraph.selectedLinks) {
         arGraph.selectedNodes = std::move(newNodes);
         arGraph.selectedLinks = std::move(newLinks);
@@ -2116,8 +2133,17 @@ IMNODAL_API void EndGraph() {
             rGraph.boxSelectBaseLinks.clear();
             rGraph.boxSelectBaseCaptured = false;
         } else {
-            // Plain bg-click → clear selection unless multi-modifier is held.
-            if (!s_multiSelectHeld(rGraph)) {
+            // Plain bg-click → clear the selection ONLY when this was a true
+            // fixed-position left click : the mouse must not have moved between
+            // the press and the release (compared in screen space, immune to
+            // pan/zoom). Any movement — a sub-threshold drag, a nudge, a release
+            // that drifted — is NOT a click and must leave the selection intact.
+            // Only a deliberate, motionless left click on empty clears it. The
+            // multi-select modifier also suppresses the clear.
+            constexpr float kBgClickJitterScreen = 1.0f;  // screen-pixels of tolerance
+            const ImVec2 pressToRelease = rCtx.Canvas().mousePosBackup - rCtx.Graph().pendingBgClickPosScreen;
+            const bool fixedPos = (pressToRelease.x * pressToRelease.x + pressToRelease.y * pressToRelease.y) <= (kBgClickJitterScreen * kBgClickJitterScreen);
+            if (fixedPos && !s_multiSelectHeld(rGraph)) {
                 s_clearSelection(rGraph);
             }
         }
@@ -2271,26 +2297,53 @@ IMNODAL_API void EndNode() {
 
     const bool notSelectable = (rNode.flags & ImNodalNodeFlags_NotSelectable) != 0;
     const bool notMovable = (rNode.flags & ImNodalNodeFlags_NotMovable) != 0;
+    const Id thisNodeId = rCtx.Graph().currentNodeId;
     if (hoveredTopMost && lmbClicked && !notSelectable) {
         const bool toggle = s_multiSelectHeld(rGraph);
-        s_selectNode(rGraph, rCtx.Graph().currentNodeId, toggle);
+        // A plain (non-toggle) click on a node ALREADY in the selection keeps
+        // the whole selection so the user can group-drag it. A click on an
+        // unselected node replaces the selection with it (then drags it as a
+        // group of one). A toggle click only edits the selection set.
+        const bool alreadySelected = rGraph.selectedNodes.count(thisNodeId) > 0;
+        if (toggle || !alreadySelected) {
+            s_selectNode(rGraph, thisNodeId, toggle);
+        } else {
+            rGraph.lastSelectedNode = thisNodeId;  // grabbed node becomes the "first" for GetSelectedNode
+        }
         rGraph.clickConsumedThisFrame = true;
         // Don't start a drag when toggling — the user is building a selection,
         // not moving the node.
         if (!notMovable && !toggle) {
-            rCtx.Graph().draggingNodeId = rCtx.Graph().currentNodeId;
-            rCtx.Graph().dragStartNodePos = rNode.pos;
-            rCtx.Graph().dragStartMouseCanvas = ImGui::GetIO().MousePos;  // canvas space (we're in local space)
+            // Snapshot the start canvas-pos of every selected, movable node so
+            // the whole selection translates together as the mouse moves.
+            rGraph.draggingNodeId = thisNodeId;
+            rGraph.dragStartMouseCanvas = ImGui::GetIO().MousePos;  // canvas space (we're in local space)
+            rGraph.dragStartPositions.clear();
+            for (const Id selectedNodeId : rGraph.selectedNodes) {
+                const auto itNode = rCtx.nodes.find(selectedNodeId);
+                if (itNode == rCtx.nodes.end()) {
+                    continue;
+                }
+                if ((itNode->second.flags & ImNodalNodeFlags_NotMovable) != 0) {
+                    continue;
+                }
+                rGraph.dragStartPositions[selectedNodeId] = itNode->second.pos;
+            }
+            // Guarantee the grabbed node is part of the group even if the
+            // selection set somehow did not contain it this frame.
+            rGraph.dragStartPositions[thisNodeId] = rNode.pos;
         }
     }
-    if (rCtx.Graph().draggingNodeId == rCtx.Graph().currentNodeId) {
+    const auto itDragStart = rGraph.dragStartPositions.find(thisNodeId);
+    if (rGraph.draggingNodeId != 0 && itDragStart != rGraph.dragStartPositions.end()) {
         if (lmbDown) {
-            const ImVec2 delta = ImGui::GetIO().MousePos - rCtx.Graph().dragStartMouseCanvas;
-            rNode.pos = rCtx.Graph().dragStartNodePos + delta;
+            const ImVec2 delta = ImGui::GetIO().MousePos - rGraph.dragStartMouseCanvas;
+            rNode.pos = itDragStart->second + delta;
             rNode.dragging = true;
         }
         if (lmbReleased) {
-            rCtx.Graph().draggingNodeId = 0;
+            rGraph.draggingNodeId = 0;
+            rGraph.dragStartPositions.clear();
             rNode.dragging = false;
         }
     } else {
@@ -2982,7 +3035,11 @@ IMNODAL_API void SetSelectedNode(Id aNodeId) {
 }
 IMNODAL_API bool IsNodeDragging(Id aNodeId) {
     Context& rCtx = s_getCtx();
-    return rCtx.Graph().draggingNodeId == aNodeId;
+    GraphState& g = rCtx.Graph();
+    // True for EVERY node of the active group drag, not only the grabbed anchor,
+    // so the host stops re-pushing the stored pos (SetNextNodePos) for the other
+    // selected nodes while they translate.
+    return g.draggingNodeId != 0 && g.dragStartPositions.count(aNodeId) > 0;
 }
 
 IMNODAL_API bool IsLinkHovered(Id aLinkId) {
