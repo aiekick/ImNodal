@@ -746,6 +746,129 @@ Call inside the `BeginCanvas` scope.
 
 ---
 
+## Automatic layouts (`ILayout`)
+
+Pluggable graph-arrangement strategies live in a **separate header**,
+`ImNodalLayouts.h` (it pulls in `<vector>`; the core `ImNodal.h` keeps its
+pointer+count ABI untouched). A layout reads a library-neutral description of
+the graph and writes the node positions back **in place** — the same
+"pass a buffer, it gets filled" idiom ImGui uses everywhere.
+
+### Data model
+
+```cpp
+struct LayoutNode {
+    Id     id;     // host node id (echoed back so the caller can correlate)
+    ImVec2 size;   // IN  : measured node size (drives column width / row packing)
+    ImVec2 pos;    // IN  : current position / OUT : computed position
+};
+struct LayoutEdge {
+    int  fromNode, toNode;   // IN : indices into LayoutGraph::nodes (provider -> consumer)
+    int  fromSlot, toSlot;   // IN : slot height index on each side (crossing reduction)
+    bool excluded;           // OUT : set when the edge is left out (cycle-closing back-edge)
+};
+struct LayoutGraph {         // in/out buffer
+    std::vector<LayoutNode> nodes;
+    std::vector<LayoutEdge> edges;   // reference nodes by index
+};
+
+class ILayout {
+public:
+    virtual ~ILayout() = default;
+    virtual bool Apply(LayoutGraph&) = 0;   // reads size + edges, writes pos + excluded ; true if it placed a node
+};
+```
+
+### Built-in — `HierarchicalLayout`
+
+A one-shot static layered (Sugiyama-style) layout: back-edge removal (DFS),
+ASAP layering, connected-component banding, barycenter ordering, then a
+coordinate-assignment pass. Places nodes in left→right columns following the
+link flow. Cycle-closing edges come back flagged via `LayoutEdge::excluded`
+(draw them orthogonally). Tunable spacing:
+
+```cpp
+class HierarchicalLayout : public ILayout {
+public:
+    struct Settings {
+        float columnGap  = 120.0f;  // horizontal gap between two layers
+        float rowGap     = 35.0f;   // vertical gap between two nodes of a layer
+        float clusterGap = 80.0f;   // extra gap between two connected components (bands)
+    };
+    HierarchicalLayout();
+    explicit HierarchicalLayout(const Settings&);
+    Settings& GetSettings();
+    void      SetSettings(const Settings&);
+    bool      Apply(LayoutGraph&) override;
+};
+```
+
+### Two ways to run a layout
+
+**1 — ImNodal drives it (recommended).** Call inside `BeginGraph/EndGraph`,
+**after** every node + link has been emitted this frame (so node sizes and slot
+owners are up to date — typically right before `EndGraph`). ImNodal collects the
+topology from its own registry, runs the layout, and writes the new positions
+back into its store **by id** (effective next frame, like `SetNextNodePos`).
+
+```cpp
+bool ApplyLayout(ILayout&);                      // raw form
+
+template <class TLayout, class... TArgs>         // convenience : builds the layout for you
+bool ApplyLayout(TArgs&&... args);
+
+bool IsLinkExcludedByLayout(Id linkId);          // true for a back-edge from the last run
+```
+
+```cpp
+// one-shot, e.g. behind an "Auto layout" menu item :
+ImNodal::ApplyLayout<ImNodal::HierarchicalLayout>();             // defaults
+ImNodal::ApplyLayout<ImNodal::HierarchicalLayout>(mySettings);  // tuned
+
+// pick a routing per link from the back-edge classification :
+for (auto& link : myLinks) {
+    const bool ortho = ImNodal::IsLinkExcludedByLayout(link.id);
+    // draw link.id as a Manhattan polyline if ortho, else as a spline
+}
+```
+
+`ApplyLayout` is **one-shot** — call it on demand, not every frame.
+
+**2 — Standalone.** Build a `LayoutGraph` yourself, run the algorithm, and push
+the results wherever your nodes live. Use this when ImNodal does not own the
+positions (your own model / solver does).
+
+```cpp
+ImNodal::LayoutGraph g;
+g.nodes.push_back({ nodeIdA, sizeA, {} });
+g.nodes.push_back({ nodeIdB, sizeB, {} });
+g.edges.push_back({ 0, 1, 0, 0, false });        // node 0 -> node 1
+
+ImNodal::HierarchicalLayout layout;
+if (layout.Apply(g)) {
+    for (auto& n : g.nodes) { myStore[n.id].pos = n.pos; }   // n.pos was filled
+    for (auto& e : g.edges) { if (e.excluded) { markOrtho(e); } }
+}
+```
+
+### Settings editor
+
+```cpp
+bool ShowHierarchicalLayoutSettingsEditor(HierarchicalLayout::Settings&);
+```
+
+Drop-in widget (one `DragFloat` per gap + a reset button), same idiom as
+`ShowStyleVarsEditor`. Returns `true` if any field changed this frame.
+
+### Writing your own layout
+
+Derive `ILayout`, fill `pos` (and optionally `excluded`) on the passed
+`LayoutGraph`, return `true` if you placed at least one node. It then works with
+both `ApplyLayout(myLayout)` and the standalone form. The interface knows nothing
+about ImNodal internals, so a layout is trivially unit-testable in isolation.
+
+---
+
 ## Style — colors & vars
 
 ImGui-style theming. The `Style` struct holds appearance only; behaviour

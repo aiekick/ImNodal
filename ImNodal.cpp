@@ -27,7 +27,9 @@ SOFTWARE.
 // and reshaped to match ImNodal's style.
 
 #include "ImNodal.h"
+#include "ImNodalLayouts.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -154,6 +156,11 @@ struct LinkState {
     // box-select. Generic over the link shape (cubic bezier, Manhattan, custom).
     std::vector<ImVec2> cachedPath;
     bool pathCached{false};
+    // Set by the last ApplyLayout run on this link's graph : non-default when the
+    // layout left the link out (a cycle-closing back-edge). PERSISTENT across
+    // frames — NOT reset by NewFrame ; only ApplyLayout rewrites it. Read via
+    // ImNodal::IsLinkExcludedByLayout so the host can draw the link orthogonally.
+    bool excludedByLayout{false};
     // Per-frame interaction state (computed by Link(), reset at NewFrame).
     bool hovered{false};
     bool clicked{false};
@@ -2444,6 +2451,126 @@ IMNODAL_API ImVec2 GetNodePos(Id aNodeId) {
     Context& rCtx = s_getCtx();
     auto it = rCtx.nodes.find(aNodeId);
     return (it != rCtx.nodes.end()) ? it->second.pos : ImVec2(0.0f, 0.0f);
+}
+
+// =====================================================================
+// Automatic layouts — drive a pluggable ILayout over the current graph
+// =====================================================================
+IMNODAL_API bool ApplyLayout(ILayout& aLayout) {
+    Context& rCtx = s_getCtx();
+    IM_ASSERT(rCtx.pGraph != nullptr && "ApplyLayout: no current graph. Call inside BeginGraph/EndGraph (or right after, same frame).");
+    GraphState& rGraph = rCtx.Graph();
+    const Id graphId = rGraph.id;
+
+    // Collect the visible nodes of the current graph in emission order, building the
+    // node-id -> compact-index map used to translate the links into LayoutEdge. The
+    // current position is fed in too, so incremental layouts can read it (the
+    // hierarchical one ignores it and overwrites pos).
+    LayoutGraph graph;
+    std::unordered_map<Id, int> nodeIndex;
+    for (const Id nodeId : rGraph.frameNodeOrder) {
+        auto nodeIt = rCtx.nodes.find(nodeId);
+        if (nodeIt == rCtx.nodes.end() || nodeIt->second.graphId != graphId) {
+            continue;
+        }
+        if (nodeIndex.find(nodeId) != nodeIndex.end()) {
+            continue;  // a node emitted twice this frame is mapped only once
+        }
+        nodeIndex[nodeId] = static_cast<int>(graph.nodes.size());
+        LayoutNode node;
+        node.id = nodeId;
+        node.size = nodeIt->second.size;
+        node.pos = nodeIt->second.pos;
+        graph.nodes.push_back(node);
+    }
+    if (graph.nodes.empty()) {
+        return false;
+    }
+
+    // Per-node slot HEIGHT index : the order each slot was emitted inside its
+    // parent node this frame. Feeds LayoutEdge::fromSlot / toSlot so the layout
+    // can sort siblings by slot height and cut link crossings.
+    std::unordered_map<Id, int> slotHeight;
+    std::unordered_map<Id, int> slotCountPerNode;
+    for (const Id slotId : rGraph.frameSlotOrder) {
+        auto slotIt = rCtx.slots.find(slotId);
+        if (slotIt == rCtx.slots.end()) {
+            continue;
+        }
+        const Id parentNode = slotIt->second.parentNode;
+        const int height = slotCountPerNode[parentNode];
+        slotHeight[slotId] = height;
+        slotCountPerNode[parentNode] = height + 1;
+    }
+
+    // Reset every link of this graph (the back-edge result is rewritten below),
+    // and collect them in a STABLE order (links live in an unordered_map ; sorting
+    // by id keeps the back-edge classification deterministic across runs).
+    std::vector<Id> graphLinks;
+    for (auto& linkPair : rCtx.links) {
+        if (linkPair.second.graphId != graphId) {
+            continue;
+        }
+        linkPair.second.excludedByLayout = false;
+        graphLinks.push_back(linkPair.first);
+    }
+    std::sort(graphLinks.begin(), graphLinks.end());
+
+    // Build the flow edges : a link goes provider(fromSlot) -> consumer(toSlot).
+    // edgeLink[e] remembers the link id so the result maps back to the right link.
+    std::vector<Id> edgeLink;
+    for (const Id linkId : graphLinks) {
+        const LinkState& rLink = rCtx.links[linkId];
+        auto fromSlotIt = rCtx.slots.find(rLink.fromSlot);
+        auto toSlotIt = rCtx.slots.find(rLink.toSlot);
+        if (fromSlotIt == rCtx.slots.end() || toSlotIt == rCtx.slots.end()) {
+            continue;
+        }
+        auto fromNodeIt = nodeIndex.find(fromSlotIt->second.parentNode);
+        auto toNodeIt = nodeIndex.find(toSlotIt->second.parentNode);
+        if (fromNodeIt == nodeIndex.end() || toNodeIt == nodeIndex.end() || fromNodeIt->second == toNodeIt->second) {
+            continue;
+        }
+        LayoutEdge edge;
+        edge.fromNode = fromNodeIt->second;
+        edge.toNode = toNodeIt->second;
+        auto fromHeightIt = slotHeight.find(rLink.fromSlot);
+        auto toHeightIt = slotHeight.find(rLink.toSlot);
+        edge.fromSlot = (fromHeightIt != slotHeight.end()) ? fromHeightIt->second : 0;
+        edge.toSlot = (toHeightIt != slotHeight.end()) ? toHeightIt->second : 0;
+        graph.edges.push_back(edge);
+        edgeLink.push_back(linkId);
+    }
+
+    if (!aLayout.Apply(graph)) {
+        return false;
+    }
+
+    // Write the layout's positions back into the node store BY id (effective next
+    // frame, like SetNextNodePos) — ImNodal owns the positions, the layout only
+    // computed them.
+    for (size_t i = 0U; i < graph.nodes.size(); ++i) {
+        auto nodeIt = rCtx.nodes.find(graph.nodes[i].id);
+        if (nodeIt != rCtx.nodes.end()) {
+            nodeIt->second.pos = graph.nodes[i].pos;
+        }
+    }
+    // Record the back-edge classification onto the matching links.
+    for (size_t e = 0U; e < edgeLink.size(); ++e) {
+        if (graph.edges[e].excluded) {
+            auto linkIt = rCtx.links.find(edgeLink[e]);
+            if (linkIt != rCtx.links.end()) {
+                linkIt->second.excludedByLayout = true;
+            }
+        }
+    }
+    return true;
+}
+
+IMNODAL_API bool IsLinkExcludedByLayout(Id aLinkId) {
+    Context& rCtx = s_getCtx();
+    auto it = rCtx.links.find(aLinkId);
+    return (it != rCtx.links.end()) && it->second.excludedByLayout;
 }
 
 // =====================================================================

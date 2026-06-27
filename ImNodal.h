@@ -1091,4 +1091,35 @@ IMNODAL_API void SetSlotBodyShape(const ImNodalShape& aShape);
 IMNODAL_API void NavigateToContent(bool aZoomToFit = true, float aMarginRatio = 0.1f);
 IMNODAL_API void NavigateToSelection(bool aZoomToFit = true, float aMarginRatio = 0.25f);
 
+// =====================================================================
+// Automatic layouts (see ImNodalLayouts.h for ILayout + built-in algorithms)
+// =====================================================================
+// ImNodal can drive a pluggable layout over the CURRENT graph : it collects the
+// topology from its own registry (the visible nodes with their measured size,
+// and the slot-to-slot links resolved to node-to-node edges), runs the layout,
+// and writes the resulting node positions back into the store (effective NEXT
+// frame, exactly like SetNextNodePos). This is one-shot — call it on demand
+// (e.g. a "Auto layout" menu item), not every frame.
+//
+// Call inside BeginGraph/EndGraph, AFTER every node + link of the graph has been
+// emitted this frame (so node sizes and slot owners are up to date) — typically
+// right before EndGraph.
+//
+// The layout may leave some edges out (cycle-closing back-edges) ; those are
+// flagged per link and read back with IsLinkExcludedByLayout so the host can
+// draw them differently (e.g. orthogonally). Returns true if at least one node
+// was repositioned.
+//
+// ILayout is forward-declared here ; include ImNodalLayouts.h to get its full
+// definition, the built-in HierarchicalLayout, AND the templated convenience
+// overload ImNodal::ApplyLayout<HierarchicalLayout>(args...) that constructs the
+// layout for you (so you rarely call this raw ILayout& form directly).
+class ILayout;
+IMNODAL_API bool ApplyLayout(ILayout& aLayout);
+
+// True if the link was classified as excluded (a back-edge) by the LAST
+// ApplyLayout run on its graph. Stays valid across frames until ApplyLayout
+// runs again. Returns false for an unknown link id.
+IMNODAL_API bool IsLinkExcludedByLayout(Id aLinkId);
+
 }  // namespace ImNodal
