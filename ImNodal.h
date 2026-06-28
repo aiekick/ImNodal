@@ -152,6 +152,18 @@ enum ImNodalSlotFlags_ {
 };
 typedef int ImNodalSlotFlags;
 
+// Undo / redo categories. Used both as a config mask (SetUndoTracking : which
+// categories the canvas snapshots) and as a report mask (what a commit / undo /
+// redo actually touched, via GetLastUndoRedoFlags).
+enum ImNodalUndoFlags_ {
+    ImNodalUndoFlags_None      = 0,
+    ImNodalUndoFlags_Positions = 1 << 0,  // node positions
+    ImNodalUndoFlags_Offset    = 1 << 1,  // canvas pan (origin)
+    ImNodalUndoFlags_Scale     = 1 << 2,  // canvas zoom (scale)
+    ImNodalUndoFlags_All       = ImNodalUndoFlags_Positions | ImNodalUndoFlags_Offset | ImNodalUndoFlags_Scale,
+};
+typedef int ImNodalUndoFlags;
+
 // =====================================================================
 // Custom hitbox shape (used by SetNodeHitbox / SetSlotHitbox)
 // =====================================================================
@@ -363,6 +375,36 @@ IMNODAL_API void   SetCanvasView(const ImVec2& aOrigin, float aScale);
 IMNODAL_API void   ResetCanvasView();                                    // origin = widget center, scale = 1
 IMNODAL_API void   CenterCanvasOn(const ImVec2& aCanvasPos);             // Keep current scale, recenter on canvas point
 IMNODAL_API void   ZoomCanvasToRect(const ImVec2& aMin, const ImVec2& aMax, float aMarginRatio = 0.1f);
+
+// -----------------------------
+// Undo / redo (built into the canvas : node positions + pan + zoom)
+// -----------------------------
+// ImNodal snapshots the chosen categories (SetUndoTracking) and coalesces an
+// interactive gesture (a node drag, a pan, a zoom) into ONE history entry,
+// committed when the gesture settles. Programmatic changes (SetNodePos,
+// ApplyLayout, NavigateToContent...) are captured the same way on the next
+// settled frame. Ctrl+Z = undo, Ctrl+Shift+Z / Ctrl+Y = redo (when the canvas
+// is hovered and no widget captures the keyboard) ; RequestUndo/Redo do it from
+// code. Restoring an entry sets back the FULL snapshot (positions + view).
+//
+// LINKS / CONNECTIONS are NOT snapshotted — that stays the host's job. To keep
+// its own history in sync, the host watches WasUndoStateCommitted() (snapshot
+// your link state at GetUndoIndex()) and WasUndoRedoApplied() (restore your link
+// state to GetUndoIndex()). All queries below are valid after EndCanvas.
+//
+// Tracking is OFF by default ; call SetUndoTracking once the canvas exists
+// (i.e. after the first BeginCanvas) to opt in.
+IMNODAL_API void             SetUndoTracking(ImNodalUndoFlags aFlags);  // which categories to snapshot (changing it clears the history)
+IMNODAL_API ImNodalUndoFlags GetUndoTracking();
+IMNODAL_API void             RequestUndo();                             // queue an undo (applied at the next EndCanvas)
+IMNODAL_API void             RequestRedo();                             // queue a redo
+IMNODAL_API bool             CanUndo();
+IMNODAL_API bool             CanRedo();
+IMNODAL_API void             ClearUndo();                               // drop the whole history (e.g. on new / loaded file)
+IMNODAL_API bool             WasUndoStateCommitted();                   // a new entry was pushed this frame
+IMNODAL_API bool             WasUndoRedoApplied();                      // an undo or redo restored an entry this frame
+IMNODAL_API int              GetUndoIndex();                            // current position in the history (the "number" to sync host state to ; -1 if empty)
+IMNODAL_API ImNodalUndoFlags GetLastUndoRedoFlags();                    // categories touched by the last commit / undo / redo
 
 // -----------------------------
 // Coordinate conversion

@@ -315,6 +315,15 @@ struct GraphState {
 // =====================================================================
 // CanvasState — per-canvas view + canvas-level interactivity state
 // =====================================================================
+// One undo/redo snapshot : node positions + the canvas view, plus a mask of what
+// changed vs the previous entry (report only). See ImNodalUndoFlags.
+struct UndoEntry {
+    std::unordered_map<Id, ImVec2> positions;  // node id -> canvas pos
+    ImVec2 origin{};
+    float scale{1.0f};
+    int changed{0};  // ImNodalUndoFlags : categories that changed when this entry was committed
+};
+
 // Holds EVERYTHING canvas-side: view transform (origin/scale/viewRect),
 // pan, background interactions (bgClick / ctxMenu), suspend nesting,
 // draw-list state, mouse / viewport / window backups, minimap state, the
@@ -378,6 +387,22 @@ struct CanvasState {
 
     // Persisted across frames to know when to auto-center
     bool viewInitialized{false};
+
+    // -----------------------------
+    // Undo / redo (see ImNodalUndoFlags). Off until SetUndoTracking enables it.
+    // -----------------------------
+    int undoTracking{0};                 // ImNodalUndoFlags mask of snapshotted categories (0 = disabled)
+    std::vector<UndoEntry> undoStack;    // history ; entry 0 = the initial state
+    int undoCursor{-1};                  // index of the current entry in undoStack
+    UndoEntry undoBaseline;              // last-committed snapshot, diffed against to detect a change
+    bool undoBaselineValid{false};
+    float undoPrevScale{1.0f};           // scale on the previous frame (zoom-in-progress detection)
+    bool undoPrevScaleValid{false};
+    bool undoCommittedThisFrame{false};  // report : a new entry was pushed this frame
+    bool undoAppliedThisFrame{false};    // report : an undo/redo restored an entry this frame
+    int undoLastFlags{0};                // report : categories touched by the last commit / undo / redo
+    bool undoRequest{false};             // pending undo (keyboard or RequestUndo)
+    bool undoRedoRequest{false};         // pending redo (keyboard or RequestRedo)
 
     // -----------------------------
     // MiniMap state
@@ -1406,6 +1431,168 @@ IMNODAL_API bool BeginCanvas(const char* aId, const ImVec2& aSize, const CanvasS
     return true;
 }
 
+// -----------------------------
+// Undo / redo internals
+// -----------------------------
+// Snapshot every node's position + the canvas view into aOut. Positions are
+// captured for ALL nodes (the id space is global) ; with a single canvas this is
+// exact. A host driving several canvases should ClearUndo per canvas as needed.
+static void s_undoCapture(const Context& arCtx, const CanvasState& arCv, UndoEntry& aOut) {
+    aOut.positions.clear();
+    for (std::unordered_map<Id, NodeState>::const_iterator it = arCtx.nodes.begin(); it != arCtx.nodes.end(); ++it) {
+        aOut.positions[it->first] = it->second.pos;
+    }
+    aOut.origin = arCv.origin;
+    aOut.scale = arCv.scale;
+}
+
+// Mask of categories that differ between aNew and aRef, limited to aTracking.
+static int s_undoDiff(const UndoEntry& aNew, const UndoEntry& aRef, int aTracking) {
+    int flags = 0;
+    if ((aTracking & ImNodalUndoFlags_Offset) && (aNew.origin.x != aRef.origin.x || aNew.origin.y != aRef.origin.y)) {
+        flags |= ImNodalUndoFlags_Offset;
+    }
+    if ((aTracking & ImNodalUndoFlags_Scale) && (aNew.scale != aRef.scale)) {
+        flags |= ImNodalUndoFlags_Scale;
+    }
+    if (aTracking & ImNodalUndoFlags_Positions) {
+        // Only a COMMON node that MOVED counts as a user change. Nodes appearing /
+        // disappearing (host show/hide) are structural, not a move -> they must not
+        // create history (handled by a silent baseline sync in s_undoProcess).
+        for (std::unordered_map<Id, ImVec2>::const_iterator it = aNew.positions.begin(); it != aNew.positions.end(); ++it) {
+            std::unordered_map<Id, ImVec2>::const_iterator ref = aRef.positions.find(it->first);
+            if (ref != aRef.positions.end() && (ref->second.x != it->second.x || ref->second.y != it->second.y)) {
+                flags |= ImNodalUndoFlags_Positions;
+                break;
+            }
+        }
+    }
+    return flags;
+}
+
+// Restore the tracked categories of aEntry into the live state, then refresh the
+// derived view transform (so post-EndCanvas queries and the next frame are correct).
+static void s_undoApply(Context& arCtx, CanvasState& arCv, const UndoEntry& aEntry, int aTracking) {
+    if (aTracking & ImNodalUndoFlags_Positions) {
+        for (std::unordered_map<Id, ImVec2>::const_iterator it = aEntry.positions.begin(); it != aEntry.positions.end(); ++it) {
+            std::unordered_map<Id, NodeState>::iterator node = arCtx.nodes.find(it->first);
+            if (node != arCtx.nodes.end()) {
+                node->second.pos = it->second;
+            }
+        }
+    }
+    if (aTracking & ImNodalUndoFlags_Offset) {
+        arCv.origin = aEntry.origin;
+    }
+    if (aTracking & ImNodalUndoFlags_Scale) {
+        arCv.scale = aEntry.scale;
+        arCv.invScale = (aEntry.scale != 0.0f) ? (1.0f / aEntry.scale) : 1.0f;
+    }
+    arCv.viewTransformPos = arCv.origin + arCv.widgetPos;
+}
+
+// Called from EndCanvas : keyboard, then apply a pending undo/redo, else auto-commit
+// when the state changed and no gesture is in progress (so a drag/pan/zoom coalesces
+// into a single entry).
+static void s_undoProcess(Context& arCtx) {
+    CanvasState& rCv = arCtx.Canvas();
+    rCv.undoCommittedThisFrame = false;
+    rCv.undoAppliedThisFrame = false;
+    if (rCv.undoTracking == 0) {
+        return;  // disabled
+    }
+
+    // keyboard : Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo. Only when the canvas is
+    // hovered and no widget owns the keyboard.
+    if (rCv.hovered && !ImGui::GetIO().WantCaptureKeyboard) {
+        const bool ctrl = ImGui::IsKeyDown(ImGuiMod_Ctrl) || ImGui::IsKeyDown(ImGuiMod_Super);
+        if (ctrl) {
+            const bool shift = ImGui::IsKeyDown(ImGuiMod_Shift);
+            if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+                if (shift) { rCv.undoRedoRequest = true; } else { rCv.undoRequest = true; }
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) {
+                rCv.undoRedoRequest = true;
+            }
+        }
+    }
+
+    // gesture in progress ? (node drag, pan, or a zoom change this frame). Defer the
+    // commit until it settles so the whole gesture becomes one entry.
+    const bool dragging = (arCtx.pGraph != nullptr) && (arCtx.pGraph->draggingNodeId != 0);
+    const bool panning = rCv.isPanning;
+    const bool zooming = rCv.undoPrevScaleValid && (rCv.scale != rCv.undoPrevScale);
+    rCv.undoPrevScale = rCv.scale;
+    rCv.undoPrevScaleValid = true;
+    const bool gesture = dragging || panning || zooming;
+
+    // first use : seed the baseline + entry 0 with the current state.
+    if (!rCv.undoBaselineValid) {
+        s_undoCapture(arCtx, rCv, rCv.undoBaseline);
+        rCv.undoStack.clear();
+        rCv.undoStack.push_back(rCv.undoBaseline);
+        rCv.undoCursor = 0;
+        rCv.undoBaselineValid = true;
+        return;
+    }
+
+    // a pending undo/redo takes priority over a commit.
+    if (rCv.undoRequest) {
+        rCv.undoRequest = false;
+        rCv.undoRedoRequest = false;
+        if (rCv.undoCursor > 0) {
+            const int leaving = rCv.undoCursor;
+            rCv.undoCursor--;
+            s_undoApply(arCtx, rCv, rCv.undoStack[(size_t)rCv.undoCursor], rCv.undoTracking);
+            rCv.undoBaseline = rCv.undoStack[(size_t)rCv.undoCursor];
+            rCv.undoAppliedThisFrame = true;
+            rCv.undoLastFlags = rCv.undoStack[(size_t)leaving].changed;  // undo reverts the delta of the entry we left
+            rCv.undoPrevScale = rCv.scale;  // the restore moved scale ; don't read it as a zoom gesture next frame
+        }
+        return;
+    }
+    if (rCv.undoRedoRequest) {
+        rCv.undoRedoRequest = false;
+        if (rCv.undoCursor + 1 < (int)rCv.undoStack.size()) {
+            rCv.undoCursor++;
+            s_undoApply(arCtx, rCv, rCv.undoStack[(size_t)rCv.undoCursor], rCv.undoTracking);
+            rCv.undoBaseline = rCv.undoStack[(size_t)rCv.undoCursor];
+            rCv.undoAppliedThisFrame = true;
+            rCv.undoLastFlags = rCv.undoStack[(size_t)rCv.undoCursor].changed;  // redo re-applies this entry's delta
+            rCv.undoPrevScale = rCv.scale;
+        }
+        return;
+    }
+
+    if (gesture) {
+        return;  // wait for the gesture to settle
+    }
+
+    // commit if the state changed since the last entry.
+    UndoEntry current;
+    s_undoCapture(arCtx, rCv, current);
+    const int changed = s_undoDiff(current, rCv.undoBaseline, rCv.undoTracking);
+    if (changed != 0) {
+        current.changed = changed;
+        if (rCv.undoCursor + 1 < (int)rCv.undoStack.size()) {
+            rCv.undoStack.resize((size_t)(rCv.undoCursor + 1));  // drop the redo tail
+        }
+        rCv.undoStack.push_back(current);
+        const int kMaxUndoDepth = 100;
+        if ((int)rCv.undoStack.size() > kMaxUndoDepth) {
+            rCv.undoStack.erase(rCv.undoStack.begin());  // bound memory ; the oldest history drops off
+        }
+        rCv.undoCursor = (int)rCv.undoStack.size() - 1;
+        rCv.undoBaseline = current;
+        rCv.undoCommittedThisFrame = true;
+        rCv.undoLastFlags = changed;
+    } else if (current.positions.size() != rCv.undoBaseline.positions.size()) {
+        // structural change only (nodes shown / hidden) : absorb it into the baseline so a
+        // later move of a newly-shown node is still detected, WITHOUT creating a history entry.
+        rCv.undoBaseline = current;
+    }
+}
+
 IMNODAL_API void EndCanvas() {
     Context& rCtx = s_getCtx();
     IM_ASSERT(rCtx.Canvas().active == true && "EndCanvas without matching BeginCanvas");
@@ -1442,6 +1629,11 @@ IMNODAL_API void EndCanvas() {
         rCtx.Canvas().bgCtxMenuRequested = false;
     }
 
+    // Undo / redo : keyboard + auto-commit / restore. Runs here (state for the frame is
+    // settled, the canvas is still current) ; node pos / view changes it makes take
+    // effect on the next frame, which is invisible under continuous redraw.
+    s_undoProcess(rCtx);
+
     // Advance ImGui layout cursor.
     ImGui::SetCursorScreenPos(rCtx.Canvas().widgetPos);
     ImGui::Dummy(rCtx.Canvas().widgetSize);
@@ -1475,6 +1667,72 @@ IMNODAL_API bool IsCanvasContextMenuRequested() {
 }
 IMNODAL_API bool IsCanvasPanning() {
     return s_getCtx().Canvas().isPanning;
+}
+
+// -----------------------------
+// Undo / redo (see ImNodalUndoFlags). All resolve against the current/last-touched
+// canvas, so call them after BeginCanvas (queries are valid after EndCanvas too).
+// -----------------------------
+IMNODAL_API void SetUndoTracking(ImNodalUndoFlags aFlags) {
+    Context& rCtx = s_getCtx();
+    if (rCtx.pCanvas == nullptr) {
+        return;
+    }
+    if (rCtx.pCanvas->undoTracking != aFlags) {
+        rCtx.pCanvas->undoTracking = aFlags;
+        // the tracked set changed : drop the old history (its entries may not match).
+        rCtx.pCanvas->undoStack.clear();
+        rCtx.pCanvas->undoCursor = -1;
+        rCtx.pCanvas->undoBaselineValid = false;
+    }
+}
+IMNODAL_API ImNodalUndoFlags GetUndoTracking() {
+    Context& rCtx = s_getCtx();
+    return (rCtx.pCanvas != nullptr) ? rCtx.pCanvas->undoTracking : 0;
+}
+IMNODAL_API void RequestUndo() {
+    Context& rCtx = s_getCtx();
+    if (rCtx.pCanvas != nullptr) {
+        rCtx.pCanvas->undoRequest = true;
+    }
+}
+IMNODAL_API void RequestRedo() {
+    Context& rCtx = s_getCtx();
+    if (rCtx.pCanvas != nullptr) {
+        rCtx.pCanvas->undoRedoRequest = true;
+    }
+}
+IMNODAL_API bool CanUndo() {
+    Context& rCtx = s_getCtx();
+    return (rCtx.pCanvas != nullptr) && (rCtx.pCanvas->undoCursor > 0);
+}
+IMNODAL_API bool CanRedo() {
+    Context& rCtx = s_getCtx();
+    return (rCtx.pCanvas != nullptr) && (rCtx.pCanvas->undoCursor + 1 < (int)rCtx.pCanvas->undoStack.size());
+}
+IMNODAL_API void ClearUndo() {
+    Context& rCtx = s_getCtx();
+    if (rCtx.pCanvas != nullptr) {
+        rCtx.pCanvas->undoStack.clear();
+        rCtx.pCanvas->undoCursor = -1;
+        rCtx.pCanvas->undoBaselineValid = false;
+    }
+}
+IMNODAL_API bool WasUndoStateCommitted() {
+    Context& rCtx = s_getCtx();
+    return (rCtx.pCanvas != nullptr) && rCtx.pCanvas->undoCommittedThisFrame;
+}
+IMNODAL_API bool WasUndoRedoApplied() {
+    Context& rCtx = s_getCtx();
+    return (rCtx.pCanvas != nullptr) && rCtx.pCanvas->undoAppliedThisFrame;
+}
+IMNODAL_API int GetUndoIndex() {
+    Context& rCtx = s_getCtx();
+    return (rCtx.pCanvas != nullptr) ? rCtx.pCanvas->undoCursor : -1;
+}
+IMNODAL_API ImNodalUndoFlags GetLastUndoRedoFlags() {
+    Context& rCtx = s_getCtx();
+    return (rCtx.pCanvas != nullptr) ? rCtx.pCanvas->undoLastFlags : 0;
 }
 
 // -----------------------------
